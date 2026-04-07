@@ -281,19 +281,24 @@ class EyeDelegate(QStyledItemDelegate):
 
 
 class PieChartWidget(QWidget):
-    """Круговая диаграмма ошибок с кнопкой закрытия."""
+    """Круговая диаграмма ошибок с подсветкой мешей при наведении."""
+
+    hovered_group = pyqtSignal(str)    # имя группы ошибок
+    hover_left = pyqtSignal()          # мышь ушла
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(200)
         self.setMaximumHeight(250)
         self.segments = []  # [(label, count, QColor), ...]
+        self.group_objects = {}  # {label: set(obj_names)}
         self.hovered_index = -1
         self.setMouseTracking(True)
 
-    def set_data(self, segments):
+    def set_data(self, segments, group_objects=None):
         """segments: list of (label, count, QColor)"""
         self.segments = segments
+        self.group_objects = group_objects or {}
         self.update()
 
     def paintEvent(self, event):
@@ -384,30 +389,41 @@ class PieChartWidget(QWidget):
         dy = event.y() - cy
         dist = math.sqrt(dx * dx + dy * dy)
 
-        if dist > chart_size // 2:
-            if self.hovered_index != -1:
-                self.hovered_index = -1
-                self.update()
-            return
-
-        # Угол от верха по часовой
-        angle = math.degrees(math.atan2(dx, -dy)) % 360
-
-        cumulative = 0
         new_hover = -1
-        for i, (label, count, color) in enumerate(self.segments):
-            cumulative += count / total * 360
-            if angle <= cumulative:
-                new_hover = i
-                break
+
+        if dist <= chart_size // 2:
+            # Навели на сегмент
+            angle = math.degrees(math.atan2(dx, -dy)) % 360
+            cumulative = 0
+            for i, (label, count, color) in enumerate(self.segments):
+                cumulative += count / total * 360
+                if angle <= cumulative:
+                    new_hover = i
+                    break
+        else:
+            # Проверяем наведение на легенду
+            legend_x = cx + chart_size // 2 + 20
+            legend_y = 20
+            mx, my = event.x(), event.y()
+            for i in range(len(self.segments)):
+                ly = legend_y + i * 24
+                if legend_x <= mx <= legend_x + 200 and ly - 2 <= my <= ly + 16:
+                    new_hover = i
+                    break
 
         if new_hover != self.hovered_index:
             self.hovered_index = new_hover
             self.update()
+            if new_hover >= 0 and new_hover < len(self.segments):
+                label = self.segments[new_hover][0]
+                self.hovered_group.emit(label)
+            else:
+                self.hover_left.emit()
 
     def leaveEvent(self, event):
         self.hovered_index = -1
         self.update()
+        self.hover_left.emit()
 
 
 class WireframeWidget(QWidget):
@@ -428,6 +444,8 @@ class WireframeWidget(QWidget):
         self.edges = []
         self.faces = []        # [[verts_list, nx, ny, nz, mat_idx], ...]
         self.mat_colors = []   # [[r, g, b], ...] per object
+        self.obj_names = []    # имя объекта для каждого face
+        self.highlighted_objects = set()  # объекты для подсветки
         self.center = [0, 0, 0]
         self.scale_factor = 1.0
 
@@ -461,8 +479,10 @@ class WireframeWidget(QWidget):
 
         all_verts = []
         all_edges = []
+        all_edge_obj_names = []
         all_faces = []
         all_mat_colors = []
+        all_obj_names = []
         vert_offset = 0
         mat_offset = 0
 
@@ -478,9 +498,11 @@ class WireframeWidget(QWidget):
             pfaces = mesh.get("preview_faces", [])
             mcols = mesh.get("mat_colors", [[0.5, 0.5, 0.5]])
 
+            obj_name = obj.get("name", "")
             all_verts.extend(pverts)
             for e in pedges:
                 all_edges.append([e[0] + vert_offset, e[1] + vert_offset])
+                all_edge_obj_names.append(obj_name)
             for f in pfaces:
                 verts_shifted = [v + vert_offset for v in f[0]]
                 all_faces.append([
@@ -488,6 +510,7 @@ class WireframeWidget(QWidget):
                     f[1], f[2], f[3],
                     f[4] + mat_offset,
                 ])
+                all_obj_names.append(obj_name)
             all_mat_colors.extend(mcols)
             vert_offset += len(pverts)
             mat_offset += len(mcols)
@@ -497,7 +520,9 @@ class WireframeWidget(QWidget):
 
         self.verts = all_verts
         self.edges = all_edges
+        self.edge_obj_names = all_edge_obj_names
         self.faces = all_faces
+        self.obj_names = all_obj_names
         self.mat_colors = all_mat_colors
 
         # Вычислить центр и масштаб
@@ -599,18 +624,23 @@ class WireframeWidget(QWidget):
 
     def _draw_wireframe(self, painter, projected):
         """Рисовать каркас."""
-        for edge in self.edges:
+        for i, edge in enumerate(self.edges):
             v1_idx, v2_idx = edge
             if v1_idx >= len(projected) or v2_idx >= len(projected):
                 continue
             x1, y1, d1 = projected[v1_idx]
             x2, y2, d2 = projected[v2_idx]
 
-            avg_depth = (d1 + d2) / 2
-            brightness = max(40, min(200, int(140 - avg_depth * 80)))
-            color = QColor(brightness, brightness + 20, brightness + 50)
+            obj_name = self.edge_obj_names[i] if i < len(self.edge_obj_names) else ""
+            if self.highlighted_objects and obj_name in self.highlighted_objects:
+                color = QColor(255, 80, 80)
+                painter.setPen(QPen(color, 2))
+            else:
+                avg_depth = (d1 + d2) / 2
+                brightness = max(40, min(200, int(140 - avg_depth * 80)))
+                color = QColor(brightness, brightness + 20, brightness + 50)
+                painter.setPen(QPen(color, 1))
 
-            painter.setPen(QPen(color, 1))
             painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 
     def _calc_lighting(self, nx, ny, nz):
@@ -634,7 +664,7 @@ class WireframeWidget(QWidget):
         from PyQt5.QtCore import QPointF
 
         draw_list = []
-        for face in self.faces:
+        for fi, face in enumerate(self.faces):
             vert_indices = face[0]
             nx, ny, nz = face[1], face[2], face[3]
             mat_idx = face[4]
@@ -660,10 +690,18 @@ class WireframeWidget(QWidget):
             if not valid or not points:
                 continue
 
+            obj_name = self.obj_names[fi] if fi < len(self.obj_names) else ""
+            is_highlighted = self.highlighted_objects and obj_name in self.highlighted_objects
+
             # Освещение
             light = self._calc_lighting(nx, ny, nz)
 
-            if self.view_mode == self.MODE_MATERIAL and mat_idx < len(self.mat_colors):
+            if is_highlighted:
+                # Подсветка красным
+                r = int(min(255, 200 * light + 80))
+                g = int(min(255, 50 * light))
+                b = int(min(255, 50 * light))
+            elif self.view_mode == self.MODE_MATERIAL and mat_idx < len(self.mat_colors):
                 mc = self.mat_colors[mat_idx]
                 r = int(min(255, mc[0] * 255 * light))
                 g = int(min(255, mc[1] * 255 * light))
@@ -739,6 +777,9 @@ class WireframeWidget(QWidget):
         self.verts = []
         self.edges = []
         self.faces = []
+        self.obj_names = []
+        self.edge_obj_names = []
+        self.highlighted_objects = set()
 
 
 class BlenderWorker(QThread):
@@ -1036,6 +1077,8 @@ class MainWindow(QMainWindow):
         chart_container_layout.addLayout(chart_header)
 
         self.pie_chart = PieChartWidget()
+        self.pie_chart.hovered_group.connect(self._on_chart_hover)
+        self.pie_chart.hover_left.connect(self._on_chart_leave)
         chart_container_layout.addWidget(self.pie_chart)
 
         issues_layout.addWidget(self.chart_container)
@@ -1045,7 +1088,10 @@ class MainWindow(QMainWindow):
         self.tree_issues.setHeaderHidden(True)
         self.tree_issues.setIndentation(20)
         self.tree_issues.setWordWrap(True)
+        self.tree_issues.setMouseTracking(True)
         self.tree_issues.itemClicked.connect(self._on_issue_clicked)
+        self.tree_issues.itemEntered.connect(self._on_issue_hover)
+        self.tree_issues.viewport().installEventFilter(self)
         issues_layout.addWidget(self.tree_issues)
 
         self.content_splitter.addWidget(self.issues_panel)
@@ -1447,6 +1493,17 @@ class MainWindow(QMainWindow):
             return
         self.wireframe.load_mesh_data(self.data, self.hidden_objects)
 
+    def _on_chart_hover(self, group_label):
+        """При наведении на сегмент диаграммы — подсветить связанные объекты."""
+        obj_names = self.pie_chart.group_objects.get(group_label, set())
+        self.wireframe.highlighted_objects = obj_names
+        self.wireframe.update()
+
+    def _on_chart_leave(self):
+        """Мышь ушла с диаграммы — убрать подсветку."""
+        self.wireframe.highlighted_objects = set()
+        self.wireframe.update()
+
     def _set_view_mode(self, mode):
         self.wireframe.view_mode = mode
         self._update_mode_buttons(mode)
@@ -1464,6 +1521,52 @@ class MainWindow(QMainWindow):
         visible = self.issues_panel.isVisible()
         self.issues_panel.setVisible(not visible)
         self.btn_show_issues.setVisible(visible)
+
+    def eventFilter(self, obj, event):
+        """Отслеживать уход мыши из дерева ошибок — снять подсветку."""
+        try:
+            if hasattr(self, 'tree_issues') and obj == self.tree_issues.viewport():
+                from PyQt5.QtCore import QEvent
+                if event.type() == QEvent.Leave:
+                    self.wireframe.highlighted_objects = set()
+                    self.wireframe.update()
+        except RuntimeError:
+            pass
+        return super().eventFilter(obj, event)
+
+    def _on_issue_hover(self, item, column):
+        """При наведении на строку ошибки — подсветить объект в превью."""
+        if not item or not self.data:
+            return
+        text = item.text(0) or ""
+
+        # Ищем имя объекта — строки вида "  ObjectName  —  описание"
+        obj_names = set()
+        if "—" in text:
+            name = text.split("—")[0].strip()
+            if name:
+                obj_names.add(name)
+        elif item.parent():
+            # Может это группа — подсветить все объекты в ней
+            parent = item.parent() if item.childCount() == 0 else item
+            for i in range(parent.childCount()):
+                child_text = parent.child(i).text(0)
+                if "—" in child_text:
+                    name = child_text.split("—")[0].strip()
+                    if name:
+                        obj_names.add(name)
+
+        # Если навели на заголовок группы — подсветить все объекты этой группы
+        if item.childCount() > 0 and not obj_names:
+            for i in range(item.childCount()):
+                child_text = item.child(i).text(0)
+                if "—" in child_text:
+                    name = child_text.split("—")[0].strip()
+                    if name:
+                        obj_names.add(name)
+
+        self.wireframe.highlighted_objects = obj_names
+        self.wireframe.update()
 
     def _on_issue_clicked(self, item, column):
         """Раскрыть/свернуть элемент при клике."""
@@ -1607,10 +1710,14 @@ class MainWindow(QMainWindow):
             QColor(200, 200, 60),    # лайм
         ]
         segments = []
+        group_objects = {}
         for i, (group_name, group_data) in enumerate(sorted_groups):
             color = chart_colors[i % len(chart_colors)]
             segments.append((group_name, len(group_data["objects"]), color))
-        self.pie_chart.set_data(segments)
+            group_objects[group_name] = set(
+                issue["object"] for issue in group_data["objects"]
+            )
+        self.pie_chart.set_data(segments, group_objects)
 
     def _copy_report(self):
         if self.data:
