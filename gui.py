@@ -445,7 +445,7 @@ class WireframeWidget(QWidget):
         self.faces = []        # [[verts_list, nx, ny, nz, mat_idx], ...]
         self.mat_colors = []   # [[r, g, b], ...] per object
         self.obj_names = []    # имя объекта для каждого face
-        self.highlighted_objects = set()  # объекты для подсветки
+        self.highlighted_objects = {}  # объекты для подсветки
         self.center = [0, 0, 0]
         self.scale_factor = 1.0
 
@@ -624,6 +624,8 @@ class WireframeWidget(QWidget):
 
     def _draw_wireframe(self, painter, projected):
         """Рисовать каркас."""
+        highlight_lines = []
+
         for i, edge in enumerate(self.edges):
             v1_idx, v2_idx = edge
             if v1_idx >= len(projected) or v2_idx >= len(projected):
@@ -633,15 +635,19 @@ class WireframeWidget(QWidget):
 
             obj_name = self.edge_obj_names[i] if i < len(self.edge_obj_names) else ""
             if self.highlighted_objects and obj_name in self.highlighted_objects:
-                color = QColor(255, 80, 80)
-                painter.setPen(QPen(color, 2))
-            else:
-                avg_depth = (d1 + d2) / 2
-                brightness = max(40, min(200, int(140 - avg_depth * 80)))
-                color = QColor(brightness, brightness + 20, brightness + 50)
-                painter.setPen(QPen(color, 1))
+                highlight_lines.append((x1, y1, x2, y2, self.highlighted_objects[obj_name]))
 
+            avg_depth = (d1 + d2) / 2
+            brightness = max(40, min(200, int(140 - avg_depth * 80)))
+            color = QColor(brightness, brightness + 20, brightness + 50)
+            painter.setPen(QPen(color, 1))
             painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+        # Обводка подсвеченных объектов поверх
+        if highlight_lines:
+            for x1, y1, x2, y2, color in highlight_lines:
+                painter.setPen(QPen(color, 1.5))
+                painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 
     def _calc_lighting(self, nx, ny, nz):
         """Рассчитать освещение — яркое, с видимыми цветами."""
@@ -691,17 +697,10 @@ class WireframeWidget(QWidget):
                 continue
 
             obj_name = self.obj_names[fi] if fi < len(self.obj_names) else ""
-            is_highlighted = self.highlighted_objects and obj_name in self.highlighted_objects
-
             # Освещение
             light = self._calc_lighting(nx, ny, nz)
 
-            if is_highlighted:
-                # Подсветка красным
-                r = int(min(255, 200 * light + 80))
-                g = int(min(255, 50 * light))
-                b = int(min(255, 50 * light))
-            elif self.view_mode == self.MODE_MATERIAL and mat_idx < len(self.mat_colors):
+            if self.view_mode == self.MODE_MATERIAL and mat_idx < len(self.mat_colors):
                 mc = self.mat_colors[mat_idx]
                 r = int(min(255, mc[0] * 255 * light))
                 g = int(min(255, mc[1] * 255 * light))
@@ -721,10 +720,24 @@ class WireframeWidget(QWidget):
         for _, points, r, g, b in draw_list:
             poly = QPolygonF([QPointF(x, y) for x, y in points])
             face_color = QColor(r, g, b)
-            # Обводка тем же цветом закрывает щели между полигонами
             painter.setPen(QPen(face_color, 1))
             painter.setBrush(QBrush(face_color))
             painter.drawPolygon(poly)
+
+        # Обводка подсвеченных объектов поверх всего
+        if self.highlighted_objects:
+            painter.setBrush(Qt.NoBrush)
+            for i, edge in enumerate(self.edges):
+                obj_name = self.edge_obj_names[i] if i < len(self.edge_obj_names) else ""
+                if obj_name not in self.highlighted_objects:
+                    continue
+                v1_idx, v2_idx = edge
+                if v1_idx >= len(projected) or v2_idx >= len(projected):
+                    continue
+                x1, y1, _ = projected[v1_idx]
+                x2, y2, _ = projected[v2_idx]
+                painter.setPen(QPen(self.highlighted_objects[obj_name], 1.5))
+                painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 
     def _auto_rotate_step(self):
         if self.auto_rotate and self.verts:
@@ -779,7 +792,7 @@ class WireframeWidget(QWidget):
         self.faces = []
         self.obj_names = []
         self.edge_obj_names = []
-        self.highlighted_objects = set()
+        self.highlighted_objects = {}
 
 
 class BlenderWorker(QThread):
@@ -1494,14 +1507,24 @@ class MainWindow(QMainWindow):
         self.wireframe.load_mesh_data(self.data, self.hidden_objects)
 
     def _on_chart_hover(self, group_label):
-        """При наведении на сегмент диаграммы — подсветить связанные объекты."""
+        """При наведении на сегмент диаграммы — подсветить связанные объекты цветом сегмента."""
         obj_names = self.pie_chart.group_objects.get(group_label, set())
-        self.wireframe.highlighted_objects = obj_names
+        # Найти цвет этого сегмента
+        color = QColor(255, 60, 60)
+        for label, count, c in self.pie_chart.segments:
+            if label == group_label:
+                color = QColor(
+                    min(c.red() + 60, 255),
+                    min(c.green() + 60, 255),
+                    min(c.blue() + 60, 255),
+                )
+                break
+        self.wireframe.highlighted_objects = {name: color for name in obj_names}
         self.wireframe.update()
 
     def _on_chart_leave(self):
         """Мышь ушла с диаграммы — убрать подсветку."""
-        self.wireframe.highlighted_objects = set()
+        self.wireframe.highlighted_objects = {}
         self.wireframe.update()
 
     def _set_view_mode(self, mode):
@@ -1528,7 +1551,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'tree_issues') and obj == self.tree_issues.viewport():
                 from PyQt5.QtCore import QEvent
                 if event.type() == QEvent.Leave:
-                    self.wireframe.highlighted_objects = set()
+                    self.wireframe.highlighted_objects = {}
                     self.wireframe.update()
         except RuntimeError:
             pass
@@ -1540,32 +1563,37 @@ class MainWindow(QMainWindow):
             return
         text = item.text(0) or ""
 
+        # Определяем цвет от корневого элемента группы
+        root = item
+        while root.parent():
+            root = root.parent()
+        color = root.foreground(0).color() if root else QColor(255, 60, 60)
+
         # Ищем имя объекта — строки вида "  ObjectName  —  описание"
-        obj_names = set()
+        obj_dict = {}
         if "—" in text:
             name = text.split("—")[0].strip()
             if name:
-                obj_names.add(name)
+                obj_dict[name] = color
         elif item.parent():
-            # Может это группа — подсветить все объекты в ней
             parent = item.parent() if item.childCount() == 0 else item
             for i in range(parent.childCount()):
                 child_text = parent.child(i).text(0)
                 if "—" in child_text:
                     name = child_text.split("—")[0].strip()
                     if name:
-                        obj_names.add(name)
+                        obj_dict[name] = color
 
-        # Если навели на заголовок группы — подсветить все объекты этой группы
-        if item.childCount() > 0 and not obj_names:
+        # Если навели на заголовок группы
+        if item.childCount() > 0 and not obj_dict:
             for i in range(item.childCount()):
                 child_text = item.child(i).text(0)
                 if "—" in child_text:
                     name = child_text.split("—")[0].strip()
                     if name:
-                        obj_names.add(name)
+                        obj_dict[name] = color
 
-        self.wireframe.highlighted_objects = obj_names
+        self.wireframe.highlighted_objects = obj_dict
         self.wireframe.update()
 
     def _on_issue_clicked(self, item, column):
