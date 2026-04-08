@@ -368,6 +368,7 @@ def extract_all(filter_object=None, meshes_only=False):
     # Проблемы
     issues = detect_issues(data["objects"])
     data["issues"] = issues
+    data["suggestions"] = generate_suggestions(data["objects"])
 
     return data
 
@@ -451,6 +452,137 @@ def detect_issues(objects):
                 })
 
     return issues
+
+
+def generate_suggestions(objects):
+    """Анализ модели и рекомендации по модификаторам."""
+    suggestions = []
+
+    for obj in objects:
+        if obj["type"] != "MESH":
+            continue
+
+        name = obj["name"]
+        mesh = obj["mesh"]
+        mods = obj.get("modifiers", [])
+        mod_types = [m["type"] for m in mods]
+
+        verts = mesh["vertices"]
+        faces = mesh["faces"]
+        quads = mesh["quads"]
+        tris = mesh["tris"]
+        ngons = mesh["ngons"]
+        dims = mesh["dimensions"]
+
+        # --- Subdivision Surface ---
+        if "SUBSURF" not in mod_types and faces > 0:
+            if faces < 500 and quads / faces > 0.7 if faces > 0 else False:
+                suggestions.append({
+                    "object": name,
+                    "modifier": "Subdivision Surface",
+                    "reason": f"Низкий полигонаж ({faces} faces) и хорошая quad-топология ({quads / faces * 100:.0f}% quads) — SubSurf сгладит модель, сохраняя лёгкую базовую сетку",
+                    "priority": "high",
+                })
+
+        # --- Mirror ---
+        if "MIRROR" not in mod_types and verts > 20:
+            # Проверяем симметрию по X
+            preview_verts = mesh.get("preview_verts", [])
+            if preview_verts:
+                center_x = sum(v[0] for v in preview_verts) / len(preview_verts)
+                left = sum(1 for v in preview_verts if v[0] < center_x - 0.01)
+                right = sum(1 for v in preview_verts if v[0] > center_x + 0.01)
+                if left > 0 and right > 0:
+                    ratio = min(left, right) / max(left, right)
+                    if ratio > 0.8:
+                        suggestions.append({
+                            "object": name,
+                            "modifier": "Mirror",
+                            "reason": f"Модель выглядит симметричной по X (соотношение сторон {ratio:.0%}) — Mirror позволит моделировать только одну половину",
+                            "priority": "medium",
+                        })
+
+        # --- Solidify ---
+        if "SOLIDIFY" not in mod_types and faces > 0:
+            # Плоский объект — толщина значительно меньше других размеров
+            sorted_dims = sorted(dims)
+            if sorted_dims[2] > 0 and sorted_dims[0] / sorted_dims[2] < 0.05:
+                suggestions.append({
+                    "object": name,
+                    "modifier": "Solidify",
+                    "reason": f"Очень тонкий объект ({sorted_dims[0]:.3f} толщина vs {sorted_dims[2]:.3f} длина) — Solidify добавит толщину одним кликом",
+                    "priority": "medium",
+                })
+
+        # --- Bevel ---
+        if "BEVEL" not in mod_types and faces > 0:
+            if quads / faces > 0.8 if faces > 0 else False:
+                if "SUBSURF" not in mod_types and faces > 50:
+                    suggestions.append({
+                        "object": name,
+                        "modifier": "Bevel",
+                        "reason": "Хорошая quad-топология без SubSurf — Bevel добавит фаски на рёбрах для более реалистичного вида, ловит свет на гранях",
+                        "priority": "low",
+                    })
+
+        # --- Weighted Normal ---
+        if faces > 100:
+            if tris > 0 and quads > 0:
+                mixed_ratio = min(tris, quads) / max(tris, quads)
+                if mixed_ratio > 0.2:
+                    has_weighted = any(m["type"] == "WEIGHTED_NORMAL" for m in mods)
+                    if not has_weighted:
+                        suggestions.append({
+                            "object": name,
+                            "modifier": "Weighted Normal",
+                            "reason": f"Смешанная топология (tris + quads) — Weighted Normal выровняет затенение, уберёт тёмные пятна на стыках",
+                            "priority": "medium",
+                        })
+
+        # --- Decimate ---
+        if verts > 10000 and "DECIMATE" not in mod_types:
+            suggestions.append({
+                "object": name,
+                "modifier": "Decimate",
+                "reason": f"Высокий полигонаж ({verts:,} вершин) — Decimate уменьшит количество полигонов для оптимизации, если модель для игры",
+                "priority": "low",
+            })
+
+        # --- Smooth Shading (не модификатор, но полезная рекомендация) ---
+        if faces > 50 and "SUBSURF" not in mod_types:
+            if quads / faces > 0.9 if faces > 0 else False:
+                suggestions.append({
+                    "object": name,
+                    "modifier": "Shade Smooth + Auto Smooth",
+                    "reason": "Почти полностью quad-модель — Shade Smooth с Auto Smooth (30°) сгладит поверхность без добавления геометрии",
+                    "priority": "medium",
+                })
+
+        # --- Array ---
+        if faces > 0 and faces < 200:
+            # Маленький объект, возможно повторяющийся элемент
+            max_dim = max(dims) if max(dims) > 0 else 1
+            min_dim = min(dims) if min(dims) > 0 else 0
+            if min_dim > 0 and max_dim / min_dim > 3:
+                suggestions.append({
+                    "object": name,
+                    "modifier": "Array",
+                    "reason": f"Вытянутый маленький объект ({faces} faces) — если это повторяющийся элемент (цепь, забор, зубцы), Array создаст массив копий автоматически",
+                    "priority": "low",
+                })
+
+        # --- Shrinkwrap ---
+        if "SHRINKWRAP" not in mod_types and faces > 0:
+            if sorted_dims[2] > 0 and sorted_dims[0] / sorted_dims[2] < 0.1:
+                if faces > 20 and faces < 500:
+                    suggestions.append({
+                        "object": name,
+                        "modifier": "Shrinkwrap",
+                        "reason": "Тонкий плоский объект — если это декоративный элемент (ремень, нашивка), Shrinkwrap облепит его по поверхности другого меша",
+                        "priority": "low",
+                    })
+
+    return suggestions
 
 
 def main():

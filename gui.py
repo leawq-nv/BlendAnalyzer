@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTextEdit, QPushButton, QLabel,
     QFileDialog, QSplitter, QTabWidget, QMessageBox, QHeaderView,
     QStatusBar, QProgressBar, QStyledItemDelegate, QStyle,
+    QMenu, QAction, QTabBar,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRectF, QTimer
 from PyQt5.QtGui import QFont, QColor, QDragEnterEvent, QDropEvent, QIcon, QPainter, QPen, QBrush
@@ -439,6 +440,37 @@ class WireframeWidget(QWidget):
         self.setMinimumSize(200, 200)
         self.setMouseTracking(True)
 
+        # Кнопки зума поверх превью
+        zoom_btn_style = """
+            QPushButton {
+                background-color: rgba(40, 40, 40, 180);
+                color: #ccc;
+                border: 1px solid #555;
+                border-radius: 4px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(70, 70, 70, 200);
+                color: white;
+            }
+        """
+        self.btn_zoom_in = QPushButton("+", self)
+        self.btn_zoom_in.setFixedSize(30, 30)
+        self.btn_zoom_in.setStyleSheet(zoom_btn_style)
+        self.btn_zoom_in.clicked.connect(lambda: self._zoom_step(1.2))
+
+        self.btn_zoom_out = QPushButton("−", self)
+        self.btn_zoom_out.setFixedSize(30, 30)
+        self.btn_zoom_out.setStyleSheet(zoom_btn_style)
+        self.btn_zoom_out.clicked.connect(lambda: self._zoom_step(1 / 1.2))
+
+        self.btn_zoom_reset = QPushButton("⟲", self)
+        self.btn_zoom_reset.setFixedSize(30, 30)
+        self.btn_zoom_reset.setStyleSheet(zoom_btn_style)
+        self.btn_zoom_reset.setToolTip("Сбросить камеру")
+        self.btn_zoom_reset.clicked.connect(self._reset_camera)
+
         # Геометрия
         self.verts = []
         self.edges = []
@@ -649,18 +681,22 @@ class WireframeWidget(QWidget):
                 painter.setPen(QPen(color, 1.5))
                 painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 
-    def _calc_lighting(self, nx, ny, nz):
-        """Рассчитать освещение — яркое, с видимыми цветами."""
+    def _calc_lighting(self, nx, ny, nz, for_material=False):
+        """Рассчитать освещение."""
         rnx, rny, rnz = self._rotate_normal(nx, ny, nz)
 
-        # Главный свет — очень яркий, спереди-сверху
-        key = max(0.0, rnz * 0.6 + rny * -0.5 + rnx * 0.2)
-        # Заполняющий — слева-спереди
-        fill = max(0.0, rnx * -0.5 + rnz * 0.3 + rny * -0.3) * 0.5
-        # Обводной — сзади
-        rim = max(0.0, rny * 0.6 + rnz * 0.2) * 0.3
-        # Высокий амбиент чтобы тёмные материалы были видны
-        ambient = 0.5
+        if for_material:
+            # Для материалов — мягкий свет, чтобы оригинальные цвета были видны
+            key = max(0.0, rnz * 0.4 + rny * -0.3 + rnx * 0.15)
+            fill = max(0.0, rnx * -0.3 + rnz * 0.2 + rny * -0.2) * 0.3
+            rim = max(0.0, rny * 0.4 + rnz * 0.15) * 0.2
+            ambient = 0.65
+        else:
+            # Для solid — контрастный свет, хорошо видна форма
+            key = max(0.0, rnz * 0.7 + rny * -0.5 + rnx * 0.25)
+            fill = max(0.0, rnx * -0.5 + rnz * 0.3 + rny * -0.3) * 0.4
+            rim = max(0.0, rny * 0.6 + rnz * 0.2) * 0.35
+            ambient = 0.3
 
         return min(1.0, ambient + key + fill + rim)
 
@@ -698,7 +734,7 @@ class WireframeWidget(QWidget):
 
             obj_name = self.obj_names[fi] if fi < len(self.obj_names) else ""
             # Освещение
-            light = self._calc_lighting(nx, ny, nz)
+            light = self._calc_lighting(nx, ny, nz, for_material=(self.view_mode == self.MODE_MATERIAL))
 
             if self.view_mode == self.MODE_MATERIAL and mat_idx < len(self.mat_colors):
                 mc = self.mat_colors[mat_idx]
@@ -738,6 +774,27 @@ class WireframeWidget(QWidget):
                 x2, y2, _ = projected[v2_idx]
                 painter.setPen(QPen(self.highlighted_objects[obj_name], 1.5))
                 painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+    def resizeEvent(self, event):
+        """Позиционировать кнопки зума в правом верхнем углу."""
+        super().resizeEvent(event)
+        margin = 8
+        x = self.width() - 30 - margin
+        self.btn_zoom_in.move(x, margin)
+        self.btn_zoom_out.move(x, margin + 34)
+        self.btn_zoom_reset.move(x, margin + 68)
+
+    def _zoom_step(self, factor):
+        self.zoom *= factor
+        self.zoom = max(0.2, min(5.0, self.zoom))
+        self.update()
+
+    def _reset_camera(self):
+        self.rot_x = 25.0
+        self.rot_y = 45.0
+        self.zoom = 1.0
+        self.auto_rotate = True
+        self.update()
 
     def _auto_rotate_step(self):
         if self.auto_rotate and self.verts:
@@ -905,7 +962,45 @@ class MainWindow(QMainWindow):
         self.btn_copy_json.clicked.connect(self._copy_json)
         top_bar.addWidget(self.btn_copy_json)
 
+        self.btn_widgets = QPushButton("Виджеты")
+        self.btn_widgets.setFixedHeight(36)
+        self.btn_widgets.clicked.connect(self._show_widgets_menu)
+        top_bar.addWidget(self.btn_widgets)
+
+        self.btn_tools = QPushButton("Инструменты")
+        self.btn_tools.setFixedHeight(36)
+        self.btn_tools.clicked.connect(self._show_tools_menu)
+        top_bar.addWidget(self.btn_tools)
+
         main_layout.addLayout(top_bar)
+
+        # === Вкладки файлов ===
+        self.file_tabs = QTabBar()
+        self.file_tabs.setTabsClosable(True)
+        self.file_tabs.setMovable(True)
+        self.file_tabs.setExpanding(False)
+        self.file_tabs.tabCloseRequested.connect(self._close_file_tab)
+        self.file_tabs.currentChanged.connect(self._switch_file_tab)
+        self.file_tabs.setVisible(False)
+
+        # Кнопка "+" для новой вкладки
+        btn_add_tab = QPushButton("+")
+        btn_add_tab.setFixedSize(28, 28)
+        btn_add_tab.setStyleSheet("""
+            QPushButton {
+                background-color: #2d2d2d; color: #888; border: 1px solid #3c3c3c;
+                border-radius: 3px; font-size: 16px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3c3c3c; color: white; }
+        """)
+        btn_add_tab.clicked.connect(self._open_file)
+
+        # file_tabs добавляется позже в preview_container
+
+        # Хранилище данных по файлам
+        self._file_sessions = {}  # tab_index → session dict
+        self._current_session_id = None
+        self._switching_tab = False
 
         # === Drop zone (видна пока нет данных) ===
         self.drop_zone = DropZone()
@@ -927,17 +1022,22 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.lbl_objects)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["", "Имя", "Тип", "Вершины", "Полигоны"])
+        self.tree.setHeaderLabels(["", "Имя", "Тег", "Тип", "Вершины", "Полигоны"])
         self.tree.setColumnWidth(0, 28)
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.tree.setColumnWidth(2, 80)
-        self.tree.setColumnWidth(3, 70)
-        self.tree.setColumnWidth(4, 70)
+        self.tree.setColumnWidth(2, 110)
+        self.tree.setColumnWidth(3, 60)
+        self.tree.setColumnWidth(4, 60)
+        self.tree.setColumnWidth(5, 60)
         self.tree.setItemDelegateForColumn(0, EyeDelegate(self.tree))
         self.tree.currentItemChanged.connect(self._on_object_selected)
         self.tree.itemChanged.connect(self._on_tree_item_changed)
+        self.tree.itemDoubleClicked.connect(self._on_tree_double_click)
         self.hidden_objects = set()
         self._updating_tree = False
+        self._rename_map = {}
+        self.selected_object = None
+        self.object_tags = {}  # mesh_name → body_part_tag  # old_name → new_name
         left_layout.addWidget(self.tree)
 
         self.content_splitter.addWidget(left_panel)
@@ -998,28 +1098,24 @@ class MainWindow(QMainWindow):
         mode_bar.addStretch()
         preview_layout.addLayout(mode_bar)
 
+        # Вкладки файлов — под кнопками режимов
+        file_tabs_row = QHBoxLayout()
+        file_tabs_row.setContentsMargins(0, 0, 0, 0)
+        file_tabs_row.setSpacing(4)
+        file_tabs_row.addWidget(self.file_tabs, 1)
+        file_tabs_row.addWidget(btn_add_tab)
+        preview_layout.addLayout(file_tabs_row)
+
         self.wireframe = WireframeWidget()
         preview_layout.addWidget(self.wireframe, 1)
 
         center_splitter.addWidget(preview_container)
 
-        # Табы с деталями
+        # Табы — всё через систему виджетов
         self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.tabCloseRequested.connect(self._on_tab_close)
 
-        self.txt_details = QTextEdit()
-        self.txt_details.setReadOnly(True)
-        self.txt_details.setFont(QFont("Monospace", 10))
-        self.tabs.addTab(self.txt_details, "Детали")
-
-        self.txt_materials = QTextEdit()
-        self.txt_materials.setReadOnly(True)
-        self.txt_materials.setFont(QFont("Monospace", 10))
-        self.tabs.addTab(self.txt_materials, "Материалы")
-
-        self.txt_report = QTextEdit()
-        self.txt_report.setReadOnly(True)
-        self.txt_report.setFont(QFont("Monospace", 9))
-        self.tabs.addTab(self.txt_report, "Полный отчёт")
 
         center_splitter.addWidget(self.tabs)
         center_splitter.setSizes([350, 300])
@@ -1127,6 +1223,464 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 0)  # indeterminate
         self.status.addPermanentWidget(self.progress)
 
+        # === Система виджетов ===
+        self.widget_panels = {}  # name -> {panel, content, visible}
+        self._init_widget_definitions()
+
+    def _init_widget_definitions(self):
+        """Определения всех доступных виджетов."""
+        self.widget_defs = {
+            "details": {
+                "title": "Детали",
+                "icon": "◆",
+                "default": True,
+            },
+            "materials": {
+                "title": "Материалы",
+                "icon": "◈",
+                "default": True,
+            },
+            "report": {
+                "title": "Полный отчёт",
+                "icon": "▤",
+                "default": True,
+            },
+            "suggestions": {
+                "title": "Рекомендации",
+                "icon": "★",
+                "default": False,
+            },
+            "stats": {
+                "title": "Статистика",
+                "icon": "▣",
+                "default": False,
+            },
+        }
+
+        # Открыть дефолтные виджеты
+        for wid, defn in self.widget_defs.items():
+            if defn.get("default"):
+                self._toggle_widget(wid, True)
+
+    def _create_widget_tab(self, widget_id):
+        """Создать вкладку-виджет в табах."""
+        defn = self.widget_defs[widget_id]
+
+        content = QTextEdit()
+        content.setReadOnly(True)
+        content.setFont(QFont("Monospace", 10))
+
+        self.widget_panels[widget_id] = {
+            "content": content,
+            "visible": False,
+            "tab_title": f"{defn['icon']} {defn['title']}",
+        }
+
+        return content
+
+    def _get_tool_blend_file(self):
+        """Получить путь к .blend для инструмента. Если несколько вкладок — спросить."""
+        sessions_with_data = []
+        for idx, session in self._file_sessions.items():
+            if session.get("data"):
+                sessions_with_data.append((idx, session))
+
+        if not sessions_with_data:
+            QMessageBox.warning(self, "Ошибка", "Нет загруженных файлов")
+            return None, None
+
+        if len(sessions_with_data) == 1:
+            s = sessions_with_data[0][1]
+            return s["data"].get("file", ""), s.get("hidden_objects", set())
+
+        # Несколько файлов — спросить
+        from PyQt5.QtWidgets import QInputDialog
+        names = []
+        for idx, s in sessions_with_data:
+            name = os.path.basename(s["data"].get("file", "?"))
+            names.append(name)
+
+        chosen, ok = QInputDialog.getItem(
+            self, "Выберите файл",
+            "Для какого файла применить инструмент?",
+            names, 0, False,
+        )
+        if not ok:
+            return None, None
+
+        chosen_idx = names.index(chosen)
+        s = sessions_with_data[chosen_idx][1]
+        return s["data"].get("file", ""), s.get("hidden_objects", set())
+
+    def _show_tools_menu(self):
+        """Показать меню инструментов."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d2d; color: #d4d4d4;
+                border: 1px solid #3c3c3c; padding: 4px;
+            }
+            QMenu::item { padding: 6px 20px; }
+            QMenu::item:selected { background-color: #264f78; }
+            QMenu::item:disabled { color: #555; }
+        """)
+
+        has_data = any(s.get("data") for s in self._file_sessions.values())
+
+        act_vgroups = QAction("Создать Vertex Groups по зонам", self)
+        act_vgroups.setEnabled(has_data)
+        act_vgroups.triggered.connect(self._create_vertex_groups)
+        menu.addAction(act_vgroups)
+
+        act_mirror = QAction("Применить Mirror модификаторы", self)
+        act_mirror.setEnabled(has_data)
+        act_mirror.triggered.connect(self._apply_mirror)
+        menu.addAction(act_mirror)
+
+        menu.addSeparator()
+
+        act_bones = QAction("Создать скелет по именам мешей", self)
+        act_bones.setEnabled(has_data)
+        act_bones.triggered.connect(self._create_bones)
+        menu.addAction(act_bones)
+
+        menu.exec_(self.btn_tools.mapToGlobal(
+            self.btn_tools.rect().bottomLeft()
+        ))
+
+    def _create_vertex_groups(self):
+        """Создать vertex groups через Blender."""
+        blend_file, hidden = self._get_tool_blend_file()
+        if not blend_file or not os.path.isfile(blend_file):
+            return
+
+        base, ext = os.path.splitext(blend_file)
+        output_path = f"{base}_vgroups{ext}"
+
+        self.status.showMessage("Создание Vertex Groups...")
+        self.progress.setVisible(True)
+
+        script = Path(__file__).parent / "scripts" / "create_vgroups.py"
+        ok, msg = self._run_blender_script(blend_file, script, output_path, "===VGROUPS_DONE===", hidden)
+
+        self.progress.setVisible(False)
+        if ok:
+            self.status.showMessage(f"Vertex Groups созданы! Сохранено: {os.path.basename(output_path)}", 5000)
+            QMessageBox.information(
+                self, "Готово",
+                f"Vertex Groups созданы по зонам:\n"
+                f"• Zone_Top, Zone_Upper, Zone_Middle, Zone_Lower\n"
+                f"• Zone_Left, Zone_Right, Zone_Center\n"
+                f"• Zone_Front, Zone_Back\n\n"
+                f"Сохранено в:\n{output_path}"
+            )
+        else:
+            self.status.showMessage("Ошибка создания Vertex Groups")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать Vertex Groups:\n{msg}")
+
+    def _run_blender_script(self, blend_file, script_path, output_path, done_marker, hidden=None, extra_args=None):
+        """Запустить Blender-скрипт и вернуть (success, message)."""
+        import subprocess
+        ignored = hidden if hidden is not None else self.hidden_objects
+        cmd = [
+            self.blender_path, "--background", blend_file,
+            "--python", str(script_path), "--", output_path,
+        ]
+        if ignored:
+            cmd.extend(["--ignore", ",".join(ignored)])
+        if extra_args:
+            cmd.extend(extra_args)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=120,
+            )
+            if done_marker in result.stdout:
+                return True, result.stdout
+            else:
+                stderr = result.stderr[:500] if result.stderr else "Неизвестная ошибка"
+                return False, stderr
+        except subprocess.TimeoutExpired:
+            return False, "Blender не ответил за 120 секунд"
+
+    def _apply_mirror(self):
+        """Применить все Mirror модификаторы."""
+        blend_file, hidden = self._get_tool_blend_file()
+        if not blend_file or not os.path.isfile(blend_file):
+            return
+
+        base, ext = os.path.splitext(blend_file)
+        output_path = f"{base}_mirrored{ext}"
+
+        self.status.showMessage("Применение Mirror модификаторов...")
+        self.progress.setVisible(True)
+
+        script = Path(__file__).parent / "scripts" / "apply_mirror.py"
+        ok, msg = self._run_blender_script(blend_file, script, output_path, "===MIRROR_DONE===", hidden)
+
+        self.progress.setVisible(False)
+        if ok:
+            self.status.showMessage(f"Mirror применён! Сохранено: {os.path.basename(output_path)}", 5000)
+            # Предложить открыть новый файл
+            reply = QMessageBox.question(
+                self, "Mirror применён",
+                f"Mirror модификаторы применены.\n"
+                f"Сохранено в: {output_path}\n\n"
+                f"Открыть этот файл в новом окне?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._open_file_in_tab(output_path)
+        else:
+            self.status.showMessage("Ошибка применения Mirror")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось применить Mirror:\n{msg}")
+
+
+    def _create_bones(self):
+        """Создать кости по тегам или именам мешей."""
+        blend_file, hidden = self._get_tool_blend_file()
+        if not blend_file or not os.path.isfile(blend_file):
+            return
+
+        # Передать теги если есть
+        extra = []
+        if self.object_tags:
+            # Формат: --tags "MeshName=Tag,MeshName2=Tag2"
+            tag_str = ",".join(f"{k}={v}" for k, v in self.object_tags.items() if v)
+            if tag_str:
+                extra = ["--tags", tag_str]
+
+        base, ext = os.path.splitext(blend_file)
+        output_path = f"{base}_rigged{ext}"
+
+        self.status.showMessage("Создание костей по тегам...")
+        self.progress.setVisible(True)
+
+        script = Path(__file__).parent / "scripts" / "create_bones.py"
+        ok, msg = self._run_blender_script(blend_file, script, output_path, "===BONES_DONE===", hidden, extra)
+
+        self.progress.setVisible(False)
+        if ok:
+            self.status.showMessage(f"Кости созданы! Сохранено: {os.path.basename(output_path)}", 5000)
+            QMessageBox.information(
+                self, "Готово",
+                f"Скелет создан по именам мешей!\n\n"
+                f"Кости расставлены с правильной иерархией\n"
+                f"и привязаны через Automatic Weights.\n\n"
+                f"{msg[:300] if msg else ''}\n\n"
+                f"Сохранено в:\n{output_path}"
+            )
+        elif "BONES_ERROR" in msg:
+            self.status.showMessage("Не найдены части тела")
+            QMessageBox.warning(
+                self, "Не найдены части тела",
+                f"Не удалось определить части тела по именам мешей.\n\n"
+                f"Назовите меши в Blender, используя ключевые слова:\n"
+                f"  head, neck, chest/torso, shoulder.L/R,\n"
+                f"  upper_arm.L/R, forearm.L/R, hand.L/R,\n"
+                f"  thigh.L/R, shin.L/R, foot.L/R, hips\n\n"
+                f"Пример: 'Head', 'UpperArm.L', 'Thigh_R'"
+            )
+        else:
+            self.status.showMessage("Ошибка создания костей")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать кости:\n{msg}")
+
+    def _create_vgroups_and_bones(self):
+        """Создать vertex groups и сразу кости."""
+        if not self.data or not self.blender_path:
+            return
+
+        blend_file = self.data.get("file", "")
+        if not blend_file or not os.path.isfile(blend_file):
+            QMessageBox.warning(self, "Ошибка", "Файл модели не найден")
+            return
+
+        base, ext = os.path.splitext(blend_file)
+        temp_path = f"{base}_vgroups{ext}"
+        output_path = f"{base}_rigged{ext}"
+
+        self.status.showMessage("Шаг 1/2: Создание Vertex Groups...")
+        self.progress.setVisible(True)
+
+        # Шаг 1: Vertex Groups
+        vg_script = Path(__file__).parent / "scripts" / "create_vgroups.py"
+        ok, msg = self._run_blender_script(blend_file, vg_script, temp_path, "===VGROUPS_DONE===")
+
+        if not ok:
+            self.progress.setVisible(False)
+            self.status.showMessage("Ошибка создания Vertex Groups")
+            QMessageBox.critical(self, "Ошибка", f"Шаг 1 не удался:\n{msg}")
+            return
+
+        # Шаг 2: Кости по созданным группам
+        self.status.showMessage("Шаг 2/2: Создание костей...")
+        bones_script = Path(__file__).parent / "scripts" / "create_bones.py"
+        ok, msg = self._run_blender_script(temp_path, bones_script, output_path, "===BONES_DONE===")
+
+        self.progress.setVisible(False)
+
+        # Удалить промежуточный файл
+        if os.path.isfile(temp_path) and temp_path != output_path:
+            os.remove(temp_path)
+
+        if ok:
+            self.status.showMessage(f"Готово! Сохранено: {os.path.basename(output_path)}", 5000)
+            QMessageBox.information(
+                self, "Готово",
+                f"Vertex Groups + Кости созданы!\n\n"
+                f"1. Vertex Groups по зонам (9 зон)\n"
+                f"2. Кость на каждую зону\n"
+                f"3. Арматура привязана к мешу\n\n"
+                f"Сохранено в:\n{output_path}"
+            )
+        else:
+            self.status.showMessage("Ошибка создания костей")
+            QMessageBox.critical(self, "Ошибка", f"Шаг 2 не удался:\n{msg}")
+
+    def _show_widgets_menu(self):
+        """Показать меню виджетов."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                border: 1px solid #3c3c3c;
+                padding: 4px;
+            }
+            QMenu::item { padding: 6px 20px; }
+            QMenu::item:selected { background-color: #264f78; }
+            QMenu::indicator { width: 16px; height: 16px; }
+            QMenu::indicator:checked { background-color: #4a9eff; border-radius: 3px; }
+            QMenu::indicator:unchecked { background-color: #3c3c3c; border-radius: 3px; }
+        """)
+
+        for wid, defn in self.widget_defs.items():
+            is_visible = wid in self.widget_panels and self.widget_panels[wid]["visible"]
+            action = QAction(f"{defn['icon']}  {defn['title']}", self)
+            action.setCheckable(True)
+            action.setChecked(is_visible)
+            action.triggered.connect(lambda checked, w=wid: self._toggle_widget(w, checked))
+            menu.addAction(action)
+
+        menu.exec_(self.btn_widgets.mapToGlobal(
+            self.btn_widgets.rect().bottomLeft()
+        ))
+
+    def _toggle_widget(self, widget_id, show):
+        """Показать/скрыть виджет как вкладку."""
+        if widget_id not in self.widget_panels:
+            self._create_widget_tab(widget_id)
+
+        wp = self.widget_panels[widget_id]
+
+        if show:
+            # Добавить вкладку если её нет
+            tab_index = self._find_widget_tab(widget_id)
+            if tab_index == -1:
+                self.tabs.addTab(wp["content"], wp["tab_title"])
+            wp["visible"] = True
+            # Переключиться на неё
+            idx = self._find_widget_tab(widget_id)
+            if idx >= 0:
+                self.tabs.setCurrentIndex(idx)
+            if self.data:
+                self._fill_widget(widget_id)
+        else:
+            # Убрать вкладку
+            tab_index = self._find_widget_tab(widget_id)
+            if tab_index >= 0:
+                self.tabs.removeTab(tab_index)
+            wp["visible"] = False
+
+    def _on_tab_close(self, index):
+        """Закрытие вкладки через крестик."""
+        widget = self.tabs.widget(index)
+        # Найти какой виджет это
+        for wid, wp in self.widget_panels.items():
+            if wp["content"] == widget:
+                wp["visible"] = False
+                self.tabs.removeTab(index)
+                return
+
+    def _find_widget_tab(self, widget_id):
+        """Найти индекс вкладки виджета."""
+        if widget_id not in self.widget_panels:
+            return -1
+        content = self.widget_panels[widget_id]["content"]
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == content:
+                return i
+        return -1
+
+    def _fill_widget(self, widget_id):
+        """Заполнить виджет данными."""
+        if widget_id not in self.widget_panels or not self.data:
+            return
+        content = self.widget_panels[widget_id]["content"]
+
+        if widget_id == "suggestions":
+            self._fill_suggestions_widget(content)
+        elif widget_id == "stats":
+            self._fill_stats_widget(content)
+        elif widget_id == "report":
+            content.setPlainText(format_text_report(self.data))
+
+    def _fill_suggestions_widget(self, content):
+        """Заполнить виджет рекомендаций."""
+        suggestions = self.data.get("suggestions", [])
+        if not suggestions:
+            content.setPlainText("Рекомендаций нет — модель выглядит хорошо!")
+            return
+
+        priority_icon = {"high": "★★★", "medium": "★★", "low": "★"}
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+
+        from collections import OrderedDict
+        by_mod = OrderedDict()
+        for s in sorted(suggestions, key=lambda s: priority_order.get(s["priority"], 3)):
+            mod = s["modifier"]
+            if mod not in by_mod:
+                by_mod[mod] = []
+            by_mod[mod].append(s)
+
+        lines = []
+        for mod_name, items in by_mod.items():
+            icon = priority_icon.get(items[0]["priority"], "")
+            obj_names = [s["object"] for s in items]
+            lines.append(f"{icon}  {mod_name}")
+            lines.append(f"   Объекты: {', '.join(obj_names)}")
+            lines.append(f"   {items[0]['reason']}")
+            lines.append("")
+
+        high = sum(1 for s in suggestions if s["priority"] == "high")
+        med = sum(1 for s in suggestions if s["priority"] == "medium")
+        low = sum(1 for s in suggestions if s["priority"] == "low")
+        lines.append(f"Итого: ★★★ {high}  |  ★★ {med}  |  ★ {low}")
+
+        content.setPlainText("\n".join(lines))
+
+    def _fill_stats_widget(self, content):
+        """Заполнить виджет статистики."""
+        objects = self.data.get("objects", [])
+        meshes = [o for o in objects if o["type"] == "MESH"]
+        total_verts = sum(o["mesh"]["vertices"] for o in meshes)
+        total_faces = sum(o["mesh"]["faces"] for o in meshes)
+        total_tris = sum(o["mesh"]["tris"] for o in meshes)
+        total_quads = sum(o["mesh"]["quads"] for o in meshes)
+        total_ngons = sum(o["mesh"]["ngons"] for o in meshes)
+        issues = len(self.data.get("issues", []))
+
+        lines = [
+            f"Объектов:  {len(objects)}  ({len(meshes)} мешей)",
+            f"Вершин:   {total_verts:,}",
+            f"Полигонов: {total_faces:,}",
+            f"  Quads:   {total_quads:,}  ({total_quads / total_faces * 100:.0f}%)" if total_faces else "",
+            f"  Tris:    {total_tris:,}  ({total_tris / total_faces * 100:.0f}%)" if total_faces and total_tris else "",
+            f"  N-gons:  {total_ngons:,}  ({total_ngons / total_faces * 100:.0f}%)" if total_faces and total_ngons else "",
+            f"Проблем:   {issues}",
+        ]
+        content.setPlainText("\n".join(l for l in lines if l))
+
     def _apply_dark_theme(self):
         self.setStyleSheet("""
             QMainWindow, QWidget {
@@ -1201,6 +1755,31 @@ class MainWindow(QMainWindow):
             QSplitter::handle {
                 background-color: #3c3c3c;
             }
+            QTabBar::tab {
+                background-color: #2d2d2d;
+                color: #888;
+                padding: 6px 14px;
+                border: 1px solid #3c3c3c;
+                border-bottom: none;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border-bottom: 2px solid #4a9eff;
+            }
+            QTabBar::tab:hover {
+                color: #ccc;
+            }
+            QTabBar::close-button {
+                image: none;
+                subcontrol-position: right;
+                margin: 2px;
+            }
+            QTabBar::close-button:hover {
+                background-color: #c42b1c;
+                border-radius: 3px;
+            }
         """)
 
     def _open_file(self):
@@ -1209,11 +1788,149 @@ class MainWindow(QMainWindow):
             "Blender Files (*.blend);;All Files (*)"
         )
         if path:
-            self._load_file(path)
+            self._open_file_in_tab(path)
+
+    def _open_file_in_tab(self, path):
+        """Открыть файл в новой вкладке."""
+        self._save_current_session()
+
+        # Имя вкладки — если дубликат, добавляем номер
+        base_name = os.path.basename(path)
+        existing_names = [self.file_tabs.tabText(i) for i in range(self.file_tabs.count())]
+        tab_name = base_name
+        counter = 2
+        while tab_name in existing_names:
+            tab_name = f"{base_name} ({counter})"
+            counter += 1
+
+        tab_idx = self.file_tabs.addTab(tab_name)
+
+        self._file_sessions[tab_idx] = {
+            "path": path,
+            "data": None,
+            "hidden_objects": set(),
+            "selected_object": None,
+            "view_mode": 0,
+        }
+
+        self._switching_tab = True
+        self.file_tabs.setCurrentIndex(tab_idx)
+        self._switching_tab = False
+        self.file_tabs.setVisible(True)
+
+        self._load_file(path)
+
+    def _save_current_session(self):
+        """Сохранить состояние текущей вкладки."""
+        idx = self.file_tabs.currentIndex()
+        if idx < 0 or idx not in self._file_sessions:
+            return
+        session = self._file_sessions[idx]
+        session["data"] = self.data
+        session["hidden_objects"] = set(self.hidden_objects)
+        session["selected_object"] = self.selected_object
+        session["view_mode"] = self.wireframe.view_mode
+        session["tags"] = dict(self.object_tags)
+
+    def _switch_file_tab(self, idx):
+        """Переключиться на другую вкладку файла."""
+        if self._switching_tab or idx < 0 or idx not in self._file_sessions:
+            return
+
+        self._switching_tab = True
+
+        try:
+            # Сохранить предыдущую
+            prev_idx = getattr(self, '_prev_tab_idx', -1)
+            if prev_idx >= 0 and prev_idx != idx and prev_idx in self._file_sessions:
+                self._file_sessions[prev_idx]["data"] = self.data
+                self._file_sessions[prev_idx]["hidden_objects"] = set(self.hidden_objects)
+                self._file_sessions[prev_idx]["selected_object"] = self.selected_object
+                self._file_sessions[prev_idx]["view_mode"] = self.wireframe.view_mode
+                self._file_sessions[prev_idx]["tags"] = dict(self.object_tags)
+
+            self._prev_tab_idx = idx
+
+            # Восстановить сессию
+            session = self._file_sessions[idx]
+            data = session.get("data")
+
+            if data:
+                self.data = data
+                self.hidden_objects = session.get("hidden_objects", set())
+                self.selected_object = session.get("selected_object")
+
+                # Восстановить режим отображения
+                view_mode = session.get("view_mode", 0)
+                self.wireframe.view_mode = view_mode
+                self._update_mode_buttons(view_mode)
+                self.object_tags = session.get("tags", {})
+
+                blend_name = os.path.basename(data.get("file", "?"))
+                self.lbl_file.setText(f"{blend_name} — Blender {data.get('blender_version', '?')}")
+                self.lbl_file.setStyleSheet("color: #4ec990; font-size: 13px;")
+
+                self.drop_zone.setVisible(False)
+                self.content_splitter.setVisible(True)
+
+                self._populate_tree(data)
+                self._populate_issues(data)
+                self.wireframe.load_mesh_data(data, self.hidden_objects)
+
+                for wid, wp in self.widget_panels.items():
+                    if wp["visible"]:
+                        self._fill_widget(wid)
+
+                obj_count = len(data.get("objects", []))
+                issue_count = len(data.get("issues", []))
+                self.lbl_objects.setText(f"Объекты ({obj_count})")
+                self.lbl_issues.setText(f"Проблемы ({issue_count})")
+                self.status.showMessage(f"Загружено: {obj_count} объектов, {issue_count} проблем")
+            else:
+                # Данные ещё не загружены
+                self.lbl_file.setText(f"Загрузка: {os.path.basename(session.get('path', '?'))}...")
+                self.lbl_file.setStyleSheet("color: #4a9eff; font-size: 13px;")
+        finally:
+            self._switching_tab = False
+
+    def _close_file_tab(self, idx):
+        """Закрыть вкладку файла."""
+        self._switching_tab = True
+
+        # Удалить сессию
+        if idx in self._file_sessions:
+            del self._file_sessions[idx]
+
+        self.file_tabs.removeTab(idx)
+
+        # Перенумеровать сессии (индексы сдвигаются после удаления)
+        old_sessions = dict(self._file_sessions)
+        self._file_sessions = {}
+        new_idx = 0
+        for old_idx in sorted(old_sessions.keys()):
+            self._file_sessions[new_idx] = old_sessions[old_idx]
+            new_idx += 1
+
+        self._switching_tab = False
+
+        if self.file_tabs.count() == 0:
+            self.file_tabs.setVisible(False)
+            self.data = None
+            self.content_splitter.setVisible(False)
+            self.drop_zone.setVisible(True)
+            self.lbl_file.setText("Файл не загружен")
+            self.lbl_file.setStyleSheet("color: #888; font-size: 13px;")
+            self.wireframe.cleanup()
+            self.tree.clear()
+            self.tree_issues.clear()
+        else:
+            # Переключиться на оставшуюся вкладку
+            new_current = self.file_tabs.currentIndex()
+            if new_current >= 0:
+                self._switch_file_tab(new_current)
 
     def _load_file(self, path):
         if not self.blender_path:
-            # Попросить указать путь вручную
             blender, _ = QFileDialog.getOpenFileName(
                 self, "Укажите путь к Blender", "",
                 "Blender (blender*);;All Files (*)"
@@ -1223,6 +1940,23 @@ class MainWindow(QMainWindow):
             self.blender_path = blender
             save_blender_path(blender)
 
+        # Создать вкладку если загрузка через drag&drop или первый запуск
+        current_idx = self.file_tabs.currentIndex()
+        if current_idx < 0 or current_idx not in self._file_sessions:
+            name = os.path.basename(path)
+            tab_idx = self.file_tabs.addTab(name)
+            self._file_sessions[tab_idx] = {
+                "path": path,
+                "data": None,
+                "hidden_objects": set(),
+                "selected_object": None,
+                "view_mode": 0,
+            }
+            self._switching_tab = True
+            self.file_tabs.setCurrentIndex(tab_idx)
+            self._switching_tab = False
+            self.file_tabs.setVisible(True)
+
         self.current_blend_path = path
         self.lbl_file.setText(f"Загрузка: {os.path.basename(path)}...")
         self.lbl_file.setStyleSheet("color: #4a9eff; font-size: 13px;")
@@ -1230,13 +1964,28 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.status.showMessage("Извлечение данных через Blender...")
 
+        # Запоминаем для какой вкладки грузим
+        load_tab_idx = self.file_tabs.currentIndex()
+
         self.worker = BlenderWorker(self.blender_path, path)
-        self.worker.finished.connect(self._on_data_loaded)
+        self.worker.finished.connect(lambda data, idx=load_tab_idx: self._on_data_loaded(data, idx))
         self.worker.error.connect(self._on_error)
         self.worker.start()
 
 
-    def _on_data_loaded(self, data):
+    def _on_data_loaded(self, data, tab_idx=None):
+        # Сохранить в сессию конкретной вкладки
+        if tab_idx is not None and tab_idx in self._file_sessions:
+            self._file_sessions[tab_idx]["data"] = data
+
+        # Если эта вкладка сейчас активна — обновляем UI
+        current_idx = self.file_tabs.currentIndex()
+        if tab_idx is not None and tab_idx != current_idx:
+            # Данные загрузились для фоновой вкладки — просто сохранили
+            self.progress.setVisible(False)
+            self.btn_open.setEnabled(True)
+            return
+
         self.data = data
         self.progress.setVisible(False)
         self.btn_open.setEnabled(True)
@@ -1257,7 +2006,10 @@ class MainWindow(QMainWindow):
         self._populate_tree(data)
         self._populate_issues(data)
         self.wireframe.load_mesh_data(data, self.hidden_objects)
-        self.txt_report.setPlainText(format_text_report(data))
+        # Обновить все открытые виджеты
+        for wid, wp in self.widget_panels.items():
+            if wp["visible"]:
+                self._fill_widget(wid)
 
         self.lbl_objects.setText(f"Объекты ({obj_count})")
         self.lbl_issues.setText(f"Проблемы ({issue_count})")
@@ -1295,16 +2047,23 @@ class MainWindow(QMainWindow):
 
             visible = obj["name"] not in self.hidden_objects
 
+            tag = self.object_tags.get(obj["name"], "")
+
             item = QTreeWidgetItem([
                 "",
                 f"{icon} {obj['name']}",
+                tag,
                 obj["type"],
                 verts,
                 faces,
             ])
             item.setCheckState(0, Qt.Checked if visible else Qt.Unchecked)
+            if tag:
+                item.setForeground(2, QColor(78, 201, 144))
+            else:
+                item.setForeground(2, QColor(80, 80, 80))
             if not visible:
-                for col in range(1, 5):
+                for col in range(1, 6):
                     item.setForeground(col, QColor(80, 80, 80))
             items_map[obj["name"]] = (item, obj)
 
@@ -1320,14 +2079,25 @@ class MainWindow(QMainWindow):
         self.tree.expandAll()
         self._updating_tree = False
 
+    def _get_selection_highlight(self):
+        """Подсветка для выбранного объекта."""
+        if self.selected_object:
+            return {self.selected_object: QColor(100, 200, 255)}
+        return {}
+
     def _on_object_selected(self, current, previous):
         if not current or not self.data:
             return
 
         # Извлечь имя без иконки (колонка 1 теперь)
         name = current.text(1)
-        for icon in OBJECT_TYPE_ICONS.values():
-            name = name.replace(f"{icon} ", "")
+        for ic in OBJECT_TYPE_ICONS.values():
+            name = name.replace(f"{ic} ", "")
+
+        # Подсветить выбранный объект в превью
+        self.selected_object = name
+        self.wireframe.highlighted_objects = {name: QColor(100, 200, 255)}
+        self.wireframe.update()
 
         obj = None
         for o in self.data.get("objects", []):
@@ -1449,12 +2219,17 @@ class MainWindow(QMainWindow):
                 for act in actions:
                     lines.append(f"  • {act['name']} [frames {act['frame_range'][0]}-{act['frame_range'][1]}]")
 
-        self.txt_details.setPlainText("\n".join(lines))
+        if "details" in self.widget_panels:
+            self.widget_panels["details"]["content"].setPlainText("\n".join(lines))
+
+    def _set_materials_text(self, text):
+        if "materials" in self.widget_panels:
+            self.widget_panels["materials"]["content"].setPlainText(text)
 
     def _show_materials(self, obj):
         mats = obj.get("materials", [])
         if not mats:
-            self.txt_materials.setPlainText("Нет материалов")
+            self._set_materials_text("Нет материалов")
             return
 
         lines = []
@@ -1476,7 +2251,380 @@ class MainWindow(QMainWindow):
                         lines.append(f"  {key}: {val}")
             lines.append("")
 
-        self.txt_materials.setPlainText("\n".join(lines))
+        self._set_materials_text("\n".join(lines))
+
+    def _on_tree_double_click(self, item, column):
+        """Двойной клик: колонка 1 = переименовать, колонка 2 = назначить тег."""
+        if column == 2:
+            self._assign_tag(item)
+            return
+        if column != 1:
+            return
+
+        from PyQt5.QtWidgets import QDialog, QCompleter, QLineEdit, QDialogButtonBox, QListWidget
+        from PyQt5.QtCore import QStringListModel
+
+        # Все поддерживаемые имена для скелета
+        BODY_PART_NAMES = [
+            # Голова / шея
+            "Head", "Neck", "Jaw",
+            # Торс
+            "Chest", "Torso", "Spine", "Spine.Upper", "Spine.Lower",
+            "Hips", "Pelvis", "Abdomen",
+            # Плечи / руки (основные)
+            "Shoulder.L", "Shoulder.R",
+            "UpperArm.L", "UpperArm.R",
+            "Forearm.L", "Forearm.R",
+            "Hand.L", "Hand.R",
+            # Суставы рук
+            "Elbow.L", "Elbow.R",
+            "Wrist.L", "Wrist.R",
+            # Пальцы рук
+            "Thumb.L", "Thumb.R",
+            "Index.L", "Index.R",
+            "Middle.L", "Middle.R",
+            "Ring.L", "Ring.R",
+            "Pinky.L", "Pinky.R",
+            # Вторая пара рук
+            "Shoulder2.L", "Shoulder2.R",
+            "UpperArm2.L", "UpperArm2.R",
+            "Forearm2.L", "Forearm2.R",
+            "Hand2.L", "Hand2.R",
+            # Ноги
+            "Thigh.L", "Thigh.R",
+            "Shin.L", "Shin.R",
+            "Calf.L", "Calf.R",
+            "Foot.L", "Foot.R",
+            # Суставы ног
+            "Knee.L", "Knee.R",
+            "Ankle.L", "Ankle.R",
+            # Стопы
+            "Toe.L", "Toe.R",
+            "Heel.L", "Heel.R",
+            # Хвост / крылья / доп
+            "Tail", "Tail.Upper", "Tail.Lower",
+            "Wing.L", "Wing.R",
+            # Броня / одежда / аксессуары
+            "Cape", "Belt", "Helmet", "Visor",
+            "Pauldron.L", "Pauldron.R",
+            "Gauntlet.L", "Gauntlet.R",
+            "Boot.L", "Boot.R",
+            "Skirt", "Tabard",
+        ]
+
+        # Получить текущее имя
+        text = item.text(1)
+        old_name = text
+        for ic in OBJECT_TYPE_ICONS.values():
+            old_name = old_name.replace(f"{ic} ", "")
+
+        # Кастомный диалог
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Переименовать объект")
+        dialog.setMinimumWidth(350)
+        dlg_layout = QVBoxLayout(dialog)
+
+        lbl = QLabel(f"Текущее имя: {old_name}")
+        lbl.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 4px;")
+        dlg_layout.addWidget(lbl)
+
+        edit = QLineEdit(old_name)
+        edit.selectAll()
+        edit.setStyleSheet("font-size: 14px; padding: 6px; background: #252526; color: #d4d4d4; border: 1px solid #3c3c3c;")
+        dlg_layout.addWidget(edit)
+
+        # Автодополнение
+        completer = QCompleter(BODY_PART_NAMES, dialog)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.popup().setStyleSheet("""
+            QListView {
+                background-color: #2d2d2d; color: #d4d4d4;
+                border: 1px solid #4a9eff; font-size: 13px;
+            }
+            QListView::item:selected { background-color: #264f78; }
+        """)
+        edit.setCompleter(completer)
+
+        # Подсказка
+        hint_label = QLabel("Части тела для скелета:")
+        hint_label.setStyleSheet("color: #666; font-size: 10px; margin-top: 8px;")
+        dlg_layout.addWidget(hint_label)
+
+        hint_list = QLabel(
+            "Head · Neck · Jaw · Chest · Spine · Hips · Pelvis\n"
+            "Shoulder.L/R · UpperArm.L/R · Elbow.L/R · Forearm.L/R · Wrist.L/R · Hand.L/R\n"
+            "Shoulder2.L/R · UpperArm2.L/R · Forearm2.L/R · Hand2.L/R  (2-я пара)\n"
+            "Thigh.L/R · Knee.L/R · Shin.L/R · Ankle.L/R · Foot.L/R · Toe.L/R\n"
+            "Пальцы: Thumb/Index/Middle/Ring/Pinky.L/R\n"
+            "Доп: Tail · Wing.L/R · Cape · Belt · Helmet · Boot.L/R"
+        )
+        hint_list.setStyleSheet("color: #4a9eff; font-size: 10px; padding: 4px; background: #1a1a2e; border-radius: 4px;")
+        hint_list.setWordWrap(True)
+        dlg_layout.addWidget(hint_list)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dlg_layout.addWidget(buttons)
+
+        dialog.setStyleSheet("""
+            QDialog { background-color: #1e1e1e; color: #d4d4d4; }
+            QPushButton { background-color: #0e639c; color: white; border: none; border-radius: 4px; padding: 6px 16px; }
+            QPushButton:hover { background-color: #1177bb; }
+        """)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        new_name = edit.text().strip()
+        if not new_name or new_name == old_name:
+            return
+
+        # Переименовать через Blender
+        if not self.data or not self.blender_path:
+            return
+
+        blend_file = self.data.get("file", "")
+        if not blend_file or not os.path.isfile(blend_file):
+            return
+
+        import subprocess
+        rename_cmd = (
+            f"import bpy\n"
+            f"obj = bpy.data.objects.get('{old_name}')\n"
+            f"if obj:\n"
+            f"    obj.name = '{new_name}'\n"
+            f"    if obj.data:\n"
+            f"        obj.data.name = '{new_name}'\n"
+            f"bpy.ops.wm.save_mainfile()\n"
+        )
+
+        result = subprocess.run(
+            [self.blender_path, "--background", blend_file,
+             "--python-expr", rename_cmd],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        # Обновить UI
+        obj_type = item.text(2)
+        icon = ""
+        for t, ic in OBJECT_TYPE_ICONS.items():
+            if t == obj_type:
+                icon = ic
+                break
+
+        self._updating_tree = True
+        item.setText(1, f"{icon} {new_name}" if icon else new_name)
+        self._updating_tree = False
+
+        # Обновить данные
+        if self.data:
+            for obj in self.data.get("objects", []):
+                if obj["name"] == old_name:
+                    obj["name"] = new_name
+                    break
+
+        # Обновить hidden_objects
+        if old_name in self.hidden_objects:
+            self.hidden_objects.discard(old_name)
+            self.hidden_objects.add(new_name)
+
+        self._rename_map[old_name] = new_name
+        self.status.showMessage(f"Переименовано: {old_name} → {new_name}", 3000)
+
+    def _assign_tag(self, item):
+        """Назначить тег — выпадающее меню с категориями, просто кликай."""
+        obj_name = item.text(1)
+        for ic in OBJECT_TYPE_ICONS.values():
+            obj_name = obj_name.replace(f"{ic} ", "")
+
+        TAG_GROUPS = {
+            "Голова": ["Head", "Neck", "Jaw"],
+            "Торс": ["Chest", "Spine", "Hips"],
+            "Рука .L": ["Shoulder.L", "UpperArm.L", "Forearm.L", "Hand.L", "Elbow.L", "Wrist.L"],
+            "Рука .R": ["Shoulder.R", "UpperArm.R", "Forearm.R", "Hand.R", "Elbow.R", "Wrist.R"],
+            "Рука2 .L": ["Shoulder2.L", "UpperArm2.L", "Forearm2.L", "Hand2.L"],
+            "Рука2 .R": ["Shoulder2.R", "UpperArm2.R", "Forearm2.R", "Hand2.R"],
+            "Пальцы .L": ["Thumb.L", "Index.L", "Middle.L", "Ring.L", "Pinky.L"],
+            "Пальцы .R": ["Thumb.R", "Index.R", "Middle.R", "Ring.R", "Pinky.R"],
+            "Нога .L": ["Thigh.L", "Shin.L", "Foot.L", "Knee.L", "Ankle.L", "Toe.L", "Heel.L"],
+            "Нога .R": ["Thigh.R", "Shin.R", "Foot.R", "Knee.R", "Ankle.R", "Toe.R", "Heel.R"],
+            "Доп": ["Tail", "Wing.L", "Wing.R", "Cape", "Belt", "Helmet", "Skirt", "Boot.L", "Boot.R"],
+        }
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d2d; color: #d4d4d4;
+                border: 1px solid #4ec990; padding: 2px;
+            }
+            QMenu::item { padding: 4px 16px; }
+            QMenu::item:selected { background-color: #264f78; }
+            QMenu::separator { height: 1px; background: #3c3c3c; margin: 2px 8px; }
+        """)
+
+        def apply_tag(tag):
+            self._updating_tree = True
+            self.object_tags[obj_name] = tag
+            item.setText(2, tag)
+            item.setForeground(2, QColor(78, 201, 144))
+            self._updating_tree = False
+            tagged = sum(1 for v in self.object_tags.values() if v)
+            self.status.showMessage(f"{obj_name} → {tag}  |  Тегов: {tagged}", 3000)
+
+        for group_name, tags in TAG_GROUPS.items():
+            submenu = menu.addMenu(group_name)
+            submenu.setStyleSheet(menu.styleSheet())
+            for tag in tags:
+                act = QAction(tag, self)
+                act.triggered.connect(lambda _, t=tag: apply_tag(t))
+                submenu.addAction(act)
+
+        menu.addSeparator()
+        act_clear = QAction("✕  Убрать тег", self)
+        act_clear.triggered.connect(lambda: self._clear_tag(item, obj_name))
+        menu.addAction(act_clear)
+
+        rect = self.tree.visualItemRect(item)
+        pos = self.tree.viewport().mapToGlobal(rect.bottomLeft())
+        menu.exec_(pos)
+
+    def _clear_tag(self, item, obj_name):
+        self._updating_tree = True
+        self.object_tags.pop(obj_name, None)
+        item.setText(2, "")
+        item.setForeground(2, QColor(80, 80, 80))
+        self._updating_tree = False
+        self.status.showMessage(f"Тег убран: {obj_name}", 3000)
+
+    def _assign_tag_OLD_REMOVE(self, item):
+        """УДАЛИТЬ"""
+        pass  # placeholder
+    def _OLD_END(self):
+        from PyQt5.QtWidgets import QDialog, QCompleter, QLineEdit, QDialogButtonBox
+
+        BODY_TAGS = [
+            "Head", "Neck", "Jaw",
+            "Chest", "Torso", "Spine", "Spine.Upper", "Spine.Lower",
+            "Hips", "Pelvis",
+            "Shoulder.L", "Shoulder.R",
+            "UpperArm.L", "UpperArm.R",
+            "Elbow.L", "Elbow.R",
+            "Forearm.L", "Forearm.R",
+            "Wrist.L", "Wrist.R",
+            "Hand.L", "Hand.R",
+            "Thumb.L", "Thumb.R", "Index.L", "Index.R",
+            "Middle.L", "Middle.R", "Ring.L", "Ring.R",
+            "Pinky.L", "Pinky.R",
+            "Shoulder2.L", "Shoulder2.R",
+            "UpperArm2.L", "UpperArm2.R",
+            "Forearm2.L", "Forearm2.R",
+            "Hand2.L", "Hand2.R",
+            "Thigh.L", "Thigh.R",
+            "Knee.L", "Knee.R",
+            "Shin.L", "Shin.R",
+            "Ankle.L", "Ankle.R",
+            "Foot.L", "Foot.R",
+            "Toe.L", "Toe.R",
+            "Heel.L", "Heel.R",
+            "Tail", "Wing.L", "Wing.R",
+            "Cape", "Belt", "Helmet", "Skirt",
+            "Pauldron.L", "Pauldron.R",
+            "Boot.L", "Boot.R",
+        ]
+
+        obj_name = item.text(1)
+        for ic in OBJECT_TYPE_ICONS.values():
+            obj_name = obj_name.replace(f"{ic} ", "")
+
+        current_tag = self.object_tags.get(obj_name, "")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Тег: {obj_name}")
+        dialog.setMinimumWidth(300)
+        dlg_layout = QVBoxLayout(dialog)
+
+        lbl = QLabel(f"Назначить тег для «{obj_name}»:")
+        lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        dlg_layout.addWidget(lbl)
+
+        edit = QLineEdit(current_tag)
+        edit.setPlaceholderText("Начните вводить... (Head, Thigh.L, ...)")
+        edit.selectAll()
+        edit.setStyleSheet("font-size: 14px; padding: 6px; background: #252526; color: #4ec990; border: 1px solid #3c3c3c;")
+        dlg_layout.addWidget(edit)
+
+        completer = QCompleter(BODY_TAGS, dialog)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.popup().setStyleSheet("""
+            QListView {
+                background-color: #2d2d2d; color: #4ec990;
+                border: 1px solid #4ec990; font-size: 13px;
+            }
+            QListView::item:selected { background-color: #264f78; }
+        """)
+        edit.setCompleter(completer)
+
+        # Быстрые кнопки для частых тегов
+        quick_layout = QHBoxLayout()
+        quick_tags = ["Head", "Chest", "Hips", "UpperArm.L", "Thigh.L", "Foot.L"]
+        for tag in quick_tags:
+            btn = QPushButton(tag)
+            btn.setFixedHeight(24)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2d2d2d; color: #4ec990; border: 1px solid #3c3c3c;
+                    border-radius: 3px; padding: 2px 6px; font-size: 10px;
+                }
+                QPushButton:hover { background-color: #3c3c3c; }
+            """)
+            btn.clicked.connect(lambda _, t=tag: edit.setText(t))
+            quick_layout.addWidget(btn)
+        dlg_layout.addLayout(quick_layout)
+
+        # Кнопка "Убрать тег"
+        buttons_layout = QHBoxLayout()
+        btn_clear = QPushButton("Убрать тег")
+        btn_clear.setStyleSheet("background-color: #5a2d2d; color: #ddd; border: none; border-radius: 4px; padding: 6px 12px;")
+        btn_clear.clicked.connect(lambda: (edit.clear(), dialog.accept()))
+        buttons_layout.addWidget(btn_clear)
+        buttons_layout.addStretch()
+
+        btn_ok = QPushButton("OK")
+        btn_ok.setStyleSheet("background-color: #0e639c; color: white; border: none; border-radius: 4px; padding: 6px 16px;")
+        btn_ok.clicked.connect(dialog.accept)
+        buttons_layout.addWidget(btn_ok)
+
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setStyleSheet("background-color: #3c3c3c; color: #ccc; border: none; border-radius: 4px; padding: 6px 16px;")
+        btn_cancel.clicked.connect(dialog.reject)
+        buttons_layout.addWidget(btn_cancel)
+        dlg_layout.addLayout(buttons_layout)
+
+        dialog.setStyleSheet("QDialog { background-color: #1e1e1e; color: #d4d4d4; }")
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        new_tag = edit.text().strip()
+
+        self._updating_tree = True
+        if new_tag:
+            self.object_tags[obj_name] = new_tag
+            item.setText(2, new_tag)
+            item.setForeground(2, QColor(78, 201, 144))
+        else:
+            self.object_tags.pop(obj_name, None)
+            item.setText(2, "")
+            item.setForeground(2, QColor(80, 80, 80))
+        self._updating_tree = False
+
+        tagged = sum(1 for v in self.object_tags.values() if v)
+        self.status.showMessage(f"Тегов назначено: {tagged}", 3000)
 
     def _on_tree_item_changed(self, item, column):
         """Чекбокс изменён — переключить видимость объекта в превью."""
@@ -1484,18 +2632,21 @@ class MainWindow(QMainWindow):
             return
 
         name = item.text(1)
-        for icon in OBJECT_TYPE_ICONS.values():
-            name = name.replace(f"{icon} ", "")
+        for ic in OBJECT_TYPE_ICONS.values():
+            name = name.replace(f"{ic} ", "")
 
         checked = item.checkState(0) == Qt.Checked
 
         if checked:
             self.hidden_objects.discard(name)
-            for col in range(1, 5):
+            for col in range(1, 6):
                 item.setForeground(col, QColor(212, 212, 212))
+            # Восстановить цвет тега
+            if item.text(2):
+                item.setForeground(2, QColor(78, 201, 144))
         else:
             self.hidden_objects.add(name)
-            for col in range(1, 5):
+            for col in range(1, 6):
                 item.setForeground(col, QColor(80, 80, 80))
 
         self._rebuild_preview()
@@ -1523,8 +2674,8 @@ class MainWindow(QMainWindow):
         self.wireframe.update()
 
     def _on_chart_leave(self):
-        """Мышь ушла с диаграммы — убрать подсветку."""
-        self.wireframe.highlighted_objects = {}
+        """Мышь ушла с диаграммы — вернуть подсветку выбранного."""
+        self.wireframe.highlighted_objects = self._get_selection_highlight()
         self.wireframe.update()
 
     def _set_view_mode(self, mode):
@@ -1551,7 +2702,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'tree_issues') and obj == self.tree_issues.viewport():
                 from PyQt5.QtCore import QEvent
                 if event.type() == QEvent.Leave:
-                    self.wireframe.highlighted_objects = {}
+                    self.wireframe.highlighted_objects = self._get_selection_highlight()
                     self.wireframe.update()
         except RuntimeError:
             pass
