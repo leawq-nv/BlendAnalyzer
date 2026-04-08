@@ -242,6 +242,7 @@ def main():
 
     ignore_names = set()
     tags_map = {}  # mesh_name → tag
+    apply_all = False
 
     for i, a in enumerate(args):
         if a == "--ignore" and i + 1 < len(args):
@@ -251,10 +252,50 @@ def main():
                 if "=" in pair:
                     mesh_name, tag = pair.split("=", 1)
                     tags_map[mesh_name] = tag
+        elif a == "--apply-all":
+            apply_all = True
 
     # Убедиться в Object Mode
     if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
+
+    # Скрыть ignored объекты в Blender
+    for obj in bpy.context.scene.objects:
+        if obj.name in ignore_names:
+            obj.hide_viewport = True
+            obj.hide_render = True
+            obj.hide_set(True)
+
+    # Применить все модификаторы и трансформации
+    if apply_all:
+        bpy.ops.object.select_all(action='DESELECT')
+
+        for obj in list(bpy.context.scene.objects):
+            if obj.hide_viewport or obj.hide_get():
+                continue
+            if obj.name in ignore_names:
+                continue
+            if obj.type != 'MESH':
+                continue
+
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = obj
+            obj.select_set(True)
+
+            for mod in list(obj.modifiers):
+                try:
+                    bpy.ops.object.modifier_apply(modifier=mod.name)
+                except RuntimeError:
+                    pass
+
+            try:
+                bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+            except RuntimeError:
+                pass
+
+            obj.select_set(False)
+
+        print("Applied all modifiers and transforms")
 
     # Анализируем мешей — сначала по тегам, потом по именам
     body_parts = {}

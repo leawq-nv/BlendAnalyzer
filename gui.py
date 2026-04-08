@@ -1036,15 +1036,34 @@ class WireframeWidget(DropHandlerMixin, QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # Если не двигали мышь — это клик, снять подсветку выделения
+            # Если не двигали мышь — это клик
             if self._drag_started and self.last_mouse_pos:
                 dx = abs(event.x() - self._drag_started.x())
                 dy = abs(event.y() - self._drag_started.y())
                 if dx < 3 and dy < 3:
-                    self.highlight.clear_selection()
-                    self.highlight.clear_lock()
+                    # Попробовать выделить меш под курсором
                     if hasattr(self, '_parent_window'):
-                        self._parent_window.selected_objects = set()
+                        mesh_name = self._parent_window._find_mesh_at_click(event.x(), event.y())
+                        if mesh_name:
+                            from PyQt5.QtWidgets import QApplication
+                            mods = QApplication.keyboardModifiers()
+                            if mods & Qt.ShiftModifier:
+                                if mesh_name in self._parent_window.selected_objects:
+                                    self._parent_window.selected_objects.discard(mesh_name)
+                                else:
+                                    self._parent_window.selected_objects.add(mesh_name)
+                            else:
+                                self._parent_window.selected_objects = {mesh_name}
+
+                            color = QColor(100, 200, 255)
+                            sel = {n: color for n in self._parent_window.selected_objects}
+                            self.highlight._selection = sel
+                            self._parent_window._select_in_tree(mesh_name)
+                        else:
+                            # Клик в пустоту — снять выделение
+                            self.highlight.clear_selection()
+                            self.highlight.clear_lock()
+                            self._parent_window.selected_objects = set()
                     self.update()
             self.dragging = False
             self._drag_started = None
@@ -1070,24 +1089,77 @@ class WireframeWidget(DropHandlerMixin, QWidget):
         self.zoom = max(0.2, min(5.0, self.zoom))
         self.update()
 
+    def _get_timeline(self):
+        """Получить таймлайн из родительского окна."""
+        if hasattr(self, '_parent_window') and hasattr(self._parent_window, 'timeline'):
+            return self._parent_window.timeline
+        return None
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Space:
             self._space_pressed = True
+            # Space без модификатора — play/pause анимацию
+            # (отпустим в keyRelease если не было комбо)
             return
         if event.key() == Qt.Key_G and event.modifiers() & Qt.AltModifier:
-            # Alt+G — полный сброс: камера + остановить вращение
             self.auto_rotate = False
             self.btn_rotate.setText("▶")
             self._reset_camera()
             self.update()
         elif event.key() == Qt.Key_G and not event.modifiers():
-            # G — вращение вкл/выкл
             self._toggle_rotation()
         elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            # Enter (после Space) — фуллскрин вьюпорта
             if hasattr(self, '_space_pressed') and self._space_pressed:
                 self._toggle_fullscreen()
                 self._space_pressed = False
+                self._space_used_combo = True
+        elif event.key() == Qt.Key_1:
+            if hasattr(self, '_space_pressed') and self._space_pressed:
+                # Space+1 — play/pause анимацию
+                tl = self._get_timeline()
+                if tl and tl.isVisible():
+                    tl.toggle_play()
+                    self._space_used_combo = True
+            else:
+                # 1 — режим Каркас
+                self.view_mode = self.MODE_WIREFRAME
+                if hasattr(self, '_parent_window'):
+                    self._parent_window._set_view_mode(self.MODE_WIREFRAME)
+                self.update()
+        elif event.key() == Qt.Key_2 and not (hasattr(self, '_space_pressed') and self._space_pressed):
+            # 2 — режим Solid
+            self.view_mode = self.MODE_SOLID
+            if hasattr(self, '_parent_window'):
+                self._parent_window._set_view_mode(self.MODE_SOLID)
+            self.update()
+        elif event.key() == Qt.Key_3 and not (hasattr(self, '_space_pressed') and self._space_pressed):
+            # 3 — режим Материалы
+            self.view_mode = self.MODE_MATERIAL
+            if hasattr(self, '_parent_window'):
+                self._parent_window._set_view_mode(self.MODE_MATERIAL)
+            self.update()
+        elif event.key() == Qt.Key_Left:
+            # ← — кадр назад
+            tl = self._get_timeline()
+            if tl and tl.isVisible():
+                tl._prev_frame()
+        elif event.key() == Qt.Key_Right:
+            # → — кадр вперёд
+            tl = self._get_timeline()
+            if tl and tl.isVisible():
+                tl._next_frame()
+        elif event.key() == Qt.Key_Home:
+            tl = self._get_timeline()
+            if tl and tl.isVisible():
+                tl._go_start()
+        elif event.key() == Qt.Key_End:
+            tl = self._get_timeline()
+            if tl and tl.isVisible():
+                tl._go_end()
+        elif event.key() == Qt.Key_H:
+            # H — скрыть выделенные объекты
+            if hasattr(self, '_parent_window'):
+                self._parent_window._hide_selected_objects()
         elif event.key() == Qt.Key_Escape:
             if hasattr(self, '_is_fullscreen') and self._is_fullscreen:
                 self._toggle_fullscreen()
@@ -1096,7 +1168,13 @@ class WireframeWidget(DropHandlerMixin, QWidget):
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_Space:
+            # Если Space не был использован в комбо — это одиночный Space = play/pause
+            if not getattr(self, '_space_used_combo', False):
+                tl = self._get_timeline()
+                if tl and tl.isVisible():
+                    tl.toggle_play()
             self._space_pressed = False
+            self._space_used_combo = False
         super().keyReleaseEvent(event)
 
     def _toggle_fullscreen(self):
@@ -1685,10 +1763,15 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        act_bones = QAction("Создать скелет по именам мешей", self)
+        act_bones = QAction("Создать скелет по именам/тегам мешей", self)
         act_bones.setEnabled(has_data)
         act_bones.triggered.connect(self._create_bones)
         menu.addAction(act_bones)
+
+        act_geo_skeleton = QAction("Геом. извл. скелета (авто)", self)
+        act_geo_skeleton.setEnabled(has_data)
+        act_geo_skeleton.triggered.connect(self._extract_skeleton_geo)
+        menu.addAction(act_geo_skeleton)
 
         menu.exec_(self.btn_tools.mapToGlobal(
             self.btn_tools.rect().bottomLeft()
@@ -1782,24 +1865,93 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось применить Mirror:\n{msg}")
 
 
+    def _extract_skeleton_geo(self):
+        """Геометрическое извлечение скелета — полностью автоматическое."""
+        blend_file, hidden = self._get_tool_blend_file()
+        if not blend_file or not os.path.isfile(blend_file):
+            return
+
+        reply = QMessageBox.warning(
+            self, "Геометрическое извлечение скелета",
+            "Автоматическое извлечение скелета из геометрии модели.\n\n"
+            "Алгоритм:\n"
+            "1. Нарезает модель горизонтальными срезами\n"
+            "2. Находит ветвления (где геометрия разделяется)\n"
+            "3. Прокладывает кости по центру каждой ветки\n"
+            "4. Привязывает через Automatic Weights\n\n"
+            "⚠ Все модификаторы и трансформации будут применены.\n"
+            "⚠ Оригинальный файл НЕ будет изменён!\n\n"
+            "Лучше всего работает с гуманоидными моделями.\n\n"
+            "Продолжить?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        base, ext = os.path.splitext(blend_file)
+        output_path = f"{base}_skeleton{ext}"
+
+        self.status.showMessage("Геометрическое извлечение скелета...")
+        self.progress.setVisible(True)
+
+        script = Path(__file__).parent / "scripts" / "extract_skeleton.py"
+        ok, msg = self._run_blender_script(blend_file, script, output_path, "===SKELETON_DONE===", hidden)
+
+        self.progress.setVisible(False)
+        if ok:
+            self.status.showMessage(f"Скелет извлечён! Сохранено: {os.path.basename(output_path)}", 5000)
+            reply = QMessageBox.information(
+                self, "Готово",
+                f"Скелет извлечён из геометрии!\n\n{msg[:400] if msg else ''}\n\n"
+                f"Сохранено в:\n{output_path}\n\n"
+                f"Открыть в новой вкладке?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._open_file_in_tab(output_path)
+        elif "SKELETON_ERROR" in (msg or ""):
+            error_detail = msg.split("SKELETON_ERROR===")[-1].strip() if "SKELETON_ERROR" in msg else msg
+            self.status.showMessage("Ошибка извлечения скелета")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось извлечь скелет:\n{error_detail}")
+        else:
+            self.status.showMessage("Ошибка извлечения скелета")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось извлечь скелет:\n{msg[:500] if msg else 'Неизвестная ошибка'}")
+
     def _create_bones(self):
         """Создать кости по тегам или именам мешей."""
         blend_file, hidden = self._get_tool_blend_file()
         if not blend_file or not os.path.isfile(blend_file):
             return
 
+        # Предупреждение
+        reply = QMessageBox.warning(
+            self, "Создание скелета",
+            "Для корректной расстановки костей будут выполнены:\n\n"
+            "1. Применены ВСЕ модификаторы (Mirror, SubSurf и др.)\n"
+            "2. Применены ВСЕ трансформации (Scale, Rotation)\n"
+            "3. Создан скелет по тегам/именам мешей\n"
+            "4. Привязка через Automatic Weights\n\n"
+            "⚠ Оригинальный файл НЕ будет изменён!\n"
+            "Результат сохранится как НОВЫЙ файл.\n\n"
+            "Продолжить?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
         # Передать теги если есть
-        extra = []
+        extra = ["--apply-all"]
         if self.object_tags:
-            # Формат: --tags "MeshName=Tag,MeshName2=Tag2"
             tag_str = ",".join(f"{k}={v}" for k, v in self.object_tags.items() if v)
             if tag_str:
-                extra = ["--tags", tag_str]
+                extra.extend(["--tags", tag_str])
 
         base, ext = os.path.splitext(blend_file)
         output_path = f"{base}_rigged{ext}"
 
-        self.status.showMessage("Создание костей по тегам...")
+        self.status.showMessage("Применение модификаторов и создание костей...")
         self.progress.setVisible(True)
 
         script = Path(__file__).parent / "scripts" / "create_bones.py"
@@ -2191,7 +2343,7 @@ class MainWindow(QMainWindow):
             if prev_idx >= 0 and prev_idx != idx and prev_idx in self._file_sessions:
                 self._file_sessions[prev_idx]["data"] = self.data
                 self._file_sessions[prev_idx]["hidden_objects"] = set(self.hidden_objects)
-                self._file_sessions[prev_idx]["selected_object"] = self.selected_object
+                self._file_sessions[prev_idx]["selected_objects"] = set(self.selected_objects)
                 self._file_sessions[prev_idx]["view_mode"] = self.wireframe.view_mode
                 self._file_sessions[prev_idx]["tags"] = dict(self.object_tags)
 
@@ -2219,19 +2371,22 @@ class MainWindow(QMainWindow):
                 self.drop_zone.setVisible(False)
                 self.content_splitter.setVisible(True)
 
-                self._populate_tree(data)
-                self._populate_issues(data)
-                self.wireframe.load_mesh_data(data, self.hidden_objects)
+                try:
+                    self._populate_tree(data)
+                    self._populate_issues(data)
+                    self.wireframe.load_mesh_data(data, self.hidden_objects)
 
-                for wid, wp in self.widget_panels.items():
-                    if wp["visible"]:
-                        self._fill_widget(wid)
+                    for wid, wp in self.widget_panels.items():
+                        if wp["visible"]:
+                            self._fill_widget(wid)
 
-                obj_count = len(data.get("objects", []))
-                issue_count = len(data.get("issues", []))
-                self.lbl_objects.setText(f"Объекты ({obj_count})")
-                self.lbl_issues.setText(f"Проблемы ({issue_count})")
-                self.status.showMessage(f"Загружено: {obj_count} объектов, {issue_count} проблем")
+                    obj_count = len(data.get("objects", []))
+                    issue_count = len(data.get("issues", []))
+                    self.lbl_objects.setText(f"Объекты ({obj_count})")
+                    self.lbl_issues.setText(f"Проблемы ({issue_count})")
+                    self.status.showMessage(f"Загружено: {obj_count} объектов, {issue_count} проблем")
+                except RuntimeError:
+                    pass  # Виджет был удалён во время переключения
             else:
                 # Данные ещё не загружены
                 self.lbl_file.setText(f"Загрузка: {os.path.basename(session.get('path', '?'))}...")
@@ -2310,29 +2465,48 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.status.showMessage("Извлечение данных через Blender...")
 
-        # Запоминаем для какой вкладки грузим
         load_tab_idx = self.file_tabs.currentIndex()
 
-        self.worker = BlenderWorker(self.blender_path, path)
-        self.worker.finished.connect(lambda data, idx=load_tab_idx: self._on_data_loaded(data, idx))
-        self.worker.error.connect(self._on_error)
-        self.worker.start()
+        # Остановить предыдущий воркер если есть
+        if hasattr(self, '_workers'):
+            old_worker = self._workers.get(load_tab_idx)
+            if old_worker and old_worker.isRunning():
+                try:
+                    old_worker.finished.disconnect()
+                    old_worker.error.disconnect()
+                except Exception:
+                    pass
+        else:
+            self._workers = {}
+
+        worker = BlenderWorker(self.blender_path, path)
+        worker.finished.connect(lambda data, idx=load_tab_idx: self._on_data_loaded(data, idx))
+        worker.error.connect(self._on_error)
+        self._workers[load_tab_idx] = worker
+        worker.start()
 
 
     def _on_data_loaded(self, data, tab_idx=None):
-        # Сохранить в сессию конкретной вкладки
-        if tab_idx is not None and tab_idx in self._file_sessions:
-            self._file_sessions[tab_idx]["data"] = data
+        try:
+            # Сохранить в сессию конкретной вкладки
+            if tab_idx is not None and tab_idx in self._file_sessions:
+                self._file_sessions[tab_idx]["data"] = data
+            elif tab_idx is not None:
+                # Вкладка была закрыта пока грузилось — игнорируем
+                self.progress.setVisible(False)
+                self.btn_open.setEnabled(True)
+                return
 
-        # Если эта вкладка сейчас активна — обновляем UI
-        current_idx = self.file_tabs.currentIndex()
-        if tab_idx is not None and tab_idx != current_idx:
-            # Данные загрузились для фоновой вкладки — просто сохранили
-            self.progress.setVisible(False)
-            self.btn_open.setEnabled(True)
+            # Если эта вкладка сейчас активна — обновляем UI
+            current_idx = self.file_tabs.currentIndex()
+            if tab_idx is not None and tab_idx != current_idx:
+                self.progress.setVisible(False)
+                self.btn_open.setEnabled(True)
+                return
+
+            self.data = data
+        except RuntimeError:
             return
-
-        self.data = data
         self.progress.setVisible(False)
         self.btn_open.setEnabled(True)
         self.btn_copy.setEnabled(True)
@@ -2473,6 +2647,98 @@ class MainWindow(QMainWindow):
         self._updating_tree = False
 
 
+
+    def _select_in_tree(self, obj_name):
+        """Выделить объект в дереве по имени."""
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            name = item.text(1)
+            for ic in OBJECT_TYPE_ICONS.values():
+                name = name.replace(f"{ic} ", "")
+            if name == obj_name:
+                self.tree.setCurrentItem(item)
+                return
+            # Проверить children
+            for ci in range(item.childCount()):
+                child = item.child(ci)
+                cname = child.text(1)
+                for ic in OBJECT_TYPE_ICONS.values():
+                    cname = cname.replace(f"{ic} ", "")
+                if cname == obj_name:
+                    self.tree.setCurrentItem(child)
+                    return
+
+    def _hide_selected_objects(self):
+        """Скрыть все выделенные объекты (H)."""
+        if not self.selected_objects:
+            return
+
+        for name in list(self.selected_objects):
+            self.hidden_objects.add(name)
+
+        self.selected_objects = set()
+        self.wireframe.highlight.clear_selection()
+
+        # Обновить дерево и превью
+        if self.data:
+            self._populate_tree(self.data)
+            self._rebuild_preview()
+
+        self.status.showMessage(f"Скрыто объектов: {len(self.hidden_objects)}", 3000)
+
+    def _find_mesh_at_click(self, click_x, click_y):
+        """Найти какой меш под курсором в 3D-превью."""
+        if not self.wireframe.verts or not self.wireframe.obj_names:
+            return None
+
+        projected = [self.wireframe._project(v[0], v[1], v[2]) for v in self.wireframe.verts]
+
+        best_name = None
+        best_dist = float('inf')
+
+        # Проверяем каждый face — попадает ли клик внутрь
+        for fi, face in enumerate(self.wireframe.faces):
+            vert_indices = face[0]
+            obj_name = self.wireframe.obj_names[fi] if fi < len(self.wireframe.obj_names) else ""
+            if not obj_name:
+                continue
+
+            # Проверяем bounding box полигона для быстрого отсечения
+            points = []
+            depth_sum = 0
+            valid = True
+            for vi in vert_indices:
+                if vi >= len(projected):
+                    valid = False
+                    break
+                sx, sy, d = projected[vi]
+                points.append((sx, sy))
+                depth_sum += d
+
+            if not valid or len(points) < 3:
+                continue
+
+            # Проверяем попадание точки в полигон (ray casting)
+            if self._point_in_polygon(click_x, click_y, points):
+                avg_depth = depth_sum / len(points)
+                if avg_depth < best_dist:
+                    best_dist = avg_depth
+                    best_name = obj_name
+
+        return best_name
+
+    def _point_in_polygon(self, px, py, polygon):
+        """Проверить попадание точки в полигон (ray casting)."""
+        n = len(polygon)
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+            if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+        return inside
 
     def _on_object_selected(self, current, previous):
         if not current or not self.data:
