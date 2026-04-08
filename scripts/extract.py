@@ -93,6 +93,76 @@ def extract_mesh_data(obj):
 
     non_manifold = sum(1 for count in edge_face_count.values() if count != 2)
 
+    # Zero-area faces (площадь ~0)
+    zero_area_faces = 0
+    for poly in mesh.polygons:
+        if poly.area < 0.000001:
+            zero_area_faces += 1
+
+    # Дубликаты вершин (вершины в одной точке, порог 0.0001)
+    from collections import defaultdict
+    vert_grid = defaultdict(list)
+    doubles_count = 0
+    for v in mesh.vertices:
+        key = (round(v.co.x, 4), round(v.co.y, 4), round(v.co.z, 4))
+        vert_grid[key].append(v.index)
+    for key, indices in vert_grid.items():
+        if len(indices) > 1:
+            doubles_count += len(indices) - 1
+
+    # Перевёрнутые нормали — полигоны, нормаль которых направлена внутрь
+    # (проверка: нормаль полигона vs направление от центра меша к центру полигона)
+    flipped_normals = 0
+    if faces > 0:
+        mesh_center_x = sum(v.co.x for v in mesh.vertices) / verts if verts > 0 else 0
+        mesh_center_y = sum(v.co.y for v in mesh.vertices) / verts if verts > 0 else 0
+        mesh_center_z = sum(v.co.z for v in mesh.vertices) / verts if verts > 0 else 0
+        for poly in mesh.polygons:
+            # Вектор от центра меша к центру полигона
+            dx = poly.center.x - mesh_center_x
+            dy = poly.center.y - mesh_center_y
+            dz = poly.center.z - mesh_center_z
+            # Если нормаль направлена в противоположную сторону — перевёрнута
+            dot = dx * poly.normal.x + dy * poly.normal.y + dz * poly.normal.z
+            if dot < 0:
+                flipped_normals += 1
+
+    # Неравномерные полигоны (очень длинные и тонкие — aspect ratio > 10)
+    thin_faces = 0
+    for poly in mesh.polygons:
+        if len(poly.vertices) < 3:
+            continue
+        verts_co = [mesh.vertices[vi].co for vi in poly.vertices]
+        edge_lengths = []
+        for i in range(len(verts_co)):
+            d = (verts_co[i] - verts_co[(i + 1) % len(verts_co)]).length
+            edge_lengths.append(d)
+        if edge_lengths:
+            max_e = max(edge_lengths)
+            min_e = min(edge_lengths)
+            if min_e > 0 and max_e / min_e > 10:
+                thin_faces += 1
+
+    # Isolated (одиночные) полигоны — грань без соседей
+    isolated_faces = 0
+    for poly in mesh.polygons:
+        has_neighbor = False
+        for i in range(len(poly.vertices)):
+            v1 = poly.vertices[i]
+            v2 = poly.vertices[(i + 1) % len(poly.vertices)]
+            key = tuple(sorted((v1, v2)))
+            if edge_face_count.get(key, 0) > 1:
+                has_neighbor = True
+                break
+        if not has_neighbor:
+            isolated_faces += 1
+
+    # Negative scale (отрицательный масштаб — зеркальная трансформация)
+    negative_scale = False
+    s = obj.scale
+    if s.x * s.y * s.z < 0:
+        negative_scale = True
+
     # Topology density — разделим bounding box на зоны по высоте (Z)
     density_zones = {}
     if verts > 0 and dims.z > 0:
@@ -185,6 +255,12 @@ def extract_mesh_data(obj):
         "loose_vertices": loose_verts,
         "loose_edges": loose_edges,
         "non_manifold_edges": non_manifold,
+        "zero_area_faces": zero_area_faces,
+        "doubles": doubles_count,
+        "flipped_normals": flipped_normals,
+        "thin_faces": thin_faces,
+        "isolated_faces": isolated_faces,
+        "negative_scale": negative_scale,
         "density_zones": density_zones,
         "preview_verts": world_verts,
         "preview_edges": preview_edges,
@@ -450,6 +526,82 @@ def detect_issues(objects):
                     "severity": "warning",
                     "message": "No vertex groups (needs weight painting for rigging)",
                 })
+
+            if mesh.get("zero_area_faces", 0) > 0:
+                issues.append({
+                    "object": name,
+                    "severity": "error",
+                    "message": f"{mesh['zero_area_faces']} zero-area face(s)",
+                })
+
+            if mesh.get("doubles", 0) > 0:
+                issues.append({
+                    "object": name,
+                    "severity": "warning",
+                    "message": f"{mesh['doubles']} duplicate vertex(es)",
+                })
+
+            if mesh.get("flipped_normals", 0) > 0:
+                total_faces = mesh.get("faces", 1)
+                pct = mesh["flipped_normals"] / total_faces * 100 if total_faces else 0
+                if pct > 30:
+                    issues.append({
+                        "object": name,
+                        "severity": "warning",
+                        "message": f"{mesh['flipped_normals']} flipped normal(s) ({pct:.0f}%)",
+                    })
+
+            if mesh.get("thin_faces", 0) > 0:
+                issues.append({
+                    "object": name,
+                    "severity": "info",
+                    "message": f"{mesh['thin_faces']} thin/degenerate face(s)",
+                })
+
+            if mesh.get("isolated_faces", 0) > 0:
+                issues.append({
+                    "object": name,
+                    "severity": "info",
+                    "message": f"{mesh['isolated_faces']} isolated face(s) (no neighbors)",
+                })
+
+            if mesh.get("negative_scale", False):
+                issues.append({
+                    "object": name,
+                    "severity": "error",
+                    "message": "Negative scale (mirrored transform, will break normals)",
+                })
+
+            # Очень высокий полигонаж для игры
+            if mesh["vertices"] > 50000:
+                issues.append({
+                    "object": name,
+                    "severity": "info",
+                    "message": f"High poly count: {mesh['vertices']:,} vertices",
+                })
+
+            # Неравномерный scale (не uniform)
+            scale = transform["scale"]
+            if any(abs(s - 1.0) > 0.001 for s in scale):
+                sx, sy, sz = abs(scale[0]), abs(scale[1]), abs(scale[2])
+                if max(sx, sy, sz) > 0:
+                    ratio = min(sx, sy, sz) / max(sx, sy, sz)
+                    if ratio < 0.5:
+                        issues.append({
+                            "object": name,
+                            "severity": "warning",
+                            "message": f"Non-uniform scale ({scale}) — will distort modifiers",
+                        })
+
+            # Пустые material slots
+            for mat in obj.get("materials", []):
+                if mat.get("name") == "(empty slot)":
+                    issues.append({
+                        "object": name,
+                        "severity": "info",
+                        "message": "Empty material slot",
+                    })
+                    break
 
     return issues
 

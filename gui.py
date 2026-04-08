@@ -12,12 +12,16 @@ from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTextEdit, QPushButton, QLabel,
     QFileDialog, QSplitter, QTabWidget, QMessageBox, QHeaderView,
     QStatusBar, QProgressBar, QStyledItemDelegate, QStyle,
-    QMenu, QAction, QTabBar,
+    QMenu, QAction, QTabBar, QDialog,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRectF, QTimer
 from PyQt5.QtGui import QFont, QColor, QDragEnterEvent, QDropEvent, QIcon, QPainter, QPen, QBrush
 
 from blend_analyzer import find_blender, save_blender_path, run_blender_extract, format_text_report
+from gui.highlight import HighlightManager
+from gui.drop_handler import DropHandlerMixin
+from gui.settings import SettingsDialog, load_config, save_config
+from gui.timeline import TimelineWidget
 
 
 # Описания проблем и способы их исправления
@@ -186,6 +190,60 @@ ISSUE_HELP = {
             "   или вручную добавить рёбра (J/K) для quad-топологии"
         ),
     },
+    "zero-area face": {
+        "title": "Полигоны с нулевой площадью",
+        "description": "Полигоны, площадь которых равна нулю — три или больше вершин в одной точке.",
+        "impact": "• Артефакты при рендере\n• Проблемы с нормалями\n• Ломают Subdivision Surface",
+        "fix": "1. Edit Mode → Select → All by Trait → Face Area\n2. Установить минимум 0.0001\n3. Удалить: X → Faces",
+    },
+    "duplicate vertex": {
+        "title": "Дубликаты вершин",
+        "description": "Несколько вершин в одной точке. Обычно появляются после экструзии или слияния объектов.",
+        "impact": "• Видимые швы при Smooth Shading\n• Проблемы с weight painting\n• Увеличивают размер файла",
+        "fix": "1. Edit Mode → выделить всё (A)\n2. Mesh → Merge → By Distance\n   (или M → By Distance)\n3. Порог: 0.0001",
+    },
+    "flipped normal": {
+        "title": "Перевёрнутые нормали",
+        "description": "Нормали части полигонов направлены внутрь модели, а не наружу.",
+        "impact": "• Полигоны невидимы или чёрные при рендере\n• Проблемы с освещением\n• Solidify работает в неправильную сторону",
+        "fix": "1. Edit Mode → выделить всё (A)\n2. Mesh → Normals → Recalculate Outside\n   (или Shift+N)",
+    },
+    "thin face": {
+        "title": "Тонкие/вытянутые полигоны",
+        "description": "Полигоны с очень большим соотношением сторон (длинные и узкие).",
+        "impact": "• Некрасивое затенение\n• Проблемы с UV-развёрткой\n• Артефакты при Subdivision",
+        "fix": "1. Edit Mode → найти тонкие полигоны\n2. Добавить edge loops (Ctrl+R) для выравнивания\n3. Или dissolve лишние рёбра (Ctrl+X)",
+    },
+    "isolated face": {
+        "title": "Изолированные полигоны",
+        "description": "Полигоны без соседей — не связаны с остальной геометрией.",
+        "impact": "• Мусор в модели\n• Мешают при weight painting\n• Увеличивают размер файла",
+        "fix": "1. Edit Mode → Select → All by Trait → Interior Faces\n   или Select Linked (Ctrl+L) и инвертировать\n2. Удалить: X → Faces",
+    },
+    "negative scale": {
+        "title": "Отрицательный масштаб",
+        "description": "Объект имеет отрицательный масштаб по одной или нескольким осям — это зеркальная трансформация.",
+        "impact": "• Нормали перевёрнуты\n• Модификаторы работают неправильно\n• Физика и коллизии сломаны\n• Экспорт в Unity/Unreal будет некорректным",
+        "fix": "1. Object Mode → выделить объект\n2. Ctrl+A → Apply Scale\n3. Затем Shift+N в Edit Mode для пересчёта нормалей",
+    },
+    "non-uniform scale": {
+        "title": "Неравномерный масштаб",
+        "description": "Масштаб по осям сильно отличается (например X=0.5, Y=1.0, Z=2.0).",
+        "impact": "• Bevel будет неравномерным\n• Solidify даст разную толщину\n• Физика деформирована",
+        "fix": "1. Object Mode → Ctrl+A → Apply Scale\n   Масштаб станет (1, 1, 1), геометрия сохранится",
+    },
+    "high poly": {
+        "title": "Высокий полигонаж",
+        "description": "Объект содержит очень много вершин (>50 000).",
+        "impact": "• Тяжёлый для игровых движков\n• Медленный рендер\n• Может тормозить viewport",
+        "fix": "1. Добавить Decimate модификатор\n2. Или использовать Remesh для ретопологии\n3. Для игр: ручная ретопология с quad-сеткой",
+    },
+    "empty material slot": {
+        "title": "Пустой слот материала",
+        "description": "У объекта есть пустой material slot без назначенного материала.",
+        "impact": "• Часть полигонов будет без материала\n• Мусор в настройках",
+        "fix": "1. Properties → Material\n2. Удалить пустой слот (кнопка —)\n   или назначить материал",
+    },
 }
 
 
@@ -210,6 +268,24 @@ def get_issue_help(message):
         return ISSUE_HELP["no vertex groups"]
     elif "n-gon" in msg:
         return ISSUE_HELP["n-gon"]
+    elif "zero-area" in msg:
+        return ISSUE_HELP["zero-area face"]
+    elif "duplicate vertex" in msg:
+        return ISSUE_HELP["duplicate vertex"]
+    elif "flipped normal" in msg:
+        return ISSUE_HELP["flipped normal"]
+    elif "thin" in msg or "degenerate" in msg:
+        return ISSUE_HELP["thin face"]
+    elif "isolated face" in msg:
+        return ISSUE_HELP["isolated face"]
+    elif "negative scale" in msg:
+        return ISSUE_HELP["negative scale"]
+    elif "non-uniform scale" in msg:
+        return ISSUE_HELP["non-uniform scale"]
+    elif "high poly" in msg:
+        return ISSUE_HELP["high poly"]
+    elif "empty material slot" in msg:
+        return ISSUE_HELP["empty material slot"]
     return None
 
 
@@ -285,6 +361,7 @@ class PieChartWidget(QWidget):
     """Круговая диаграмма ошибок с подсветкой мешей при наведении."""
 
     hovered_group = pyqtSignal(str)    # имя группы ошибок
+    clicked_group = pyqtSignal(str)    # клик по сегменту — фиксация
     hover_left = pyqtSignal()          # мышь ушла
 
     def __init__(self, parent=None):
@@ -421,24 +498,35 @@ class PieChartWidget(QWidget):
             else:
                 self.hover_left.emit()
 
+    def mousePressEvent(self, event):
+        """Клик — зафиксировать подсветку."""
+        if event.button() == Qt.LeftButton and self.hovered_index >= 0:
+            label = self.segments[self.hovered_index][0]
+            self.clicked_group.emit(label)
+
     def leaveEvent(self, event):
         self.hovered_index = -1
         self.update()
         self.hover_left.emit()
 
 
-class WireframeWidget(QWidget):
-    """3D-превью модели с 3 режимами отображения."""
+class WireframeWidget(DropHandlerMixin, QWidget):
+    """3D-превью модели с 3 режимами отображения и drag & drop."""
 
     MODE_WIREFRAME = 0
     MODE_SOLID = 1
     MODE_MATERIAL = 2
     MODE_NAMES = ["Каркас", "Solid", "Материалы"]
 
+    file_dropped = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(200, 200)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.init_drop_handler()
+        self.highlight = HighlightManager()
 
         # Кнопки зума поверх превью
         zoom_btn_style = """
@@ -471,30 +559,41 @@ class WireframeWidget(QWidget):
         self.btn_zoom_reset.setToolTip("Сбросить камеру")
         self.btn_zoom_reset.clicked.connect(self._reset_camera)
 
+        self.btn_rotate = QPushButton("▶", self)
+        self.btn_rotate.setFixedSize(30, 30)
+        self.btn_rotate.setStyleSheet(zoom_btn_style)
+        self.btn_rotate.setToolTip("Вращение вкл/выкл")
+        self.btn_rotate.clicked.connect(self._toggle_rotation)
+
+        # Данные сцены для отображения
+        self.scene_dimensions = [0, 0, 0]
+        self.scene_scale = [1, 1, 1]
+        self.scene_rotation = [0, 0, 0]
+
         # Геометрия
         self.verts = []
         self.edges = []
         self.faces = []        # [[verts_list, nx, ny, nz, mat_idx], ...]
         self.mat_colors = []   # [[r, g, b], ...] per object
         self.obj_names = []    # имя объекта для каждого face
-        self.highlighted_objects = {}  # объекты для подсветки
+        # self.highlight создан выше (HighlightManager)
         self.center = [0, 0, 0]
         self.scale_factor = 1.0
 
         # Режим отображения
         self.view_mode = self.MODE_WIREFRAME
 
-        # Камера
-        self.rot_x = 25.0
-        self.rot_y = 45.0
-        self.zoom = 1.0
+        # Камера — спереди, перпендикулярно
+        self.rot_x = 0.0
+        self.rot_y = 270.0
+        self.zoom = 1.8
 
         # Мышь
         self.last_mouse_pos = None
         self.dragging = False
 
-        # Авто-вращение
-        self.auto_rotate = True
+        # Авто-вращение — выключено по умолчанию
+        self.auto_rotate = False
         self.auto_timer = QTimer()
         self.auto_timer.timeout.connect(self._auto_rotate_step)
         self.auto_timer.start(30)
@@ -568,6 +667,44 @@ class WireframeWidget(QWidget):
         ]
         size = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
         self.scale_factor = 1.0 / size if size > 0 else 1.0
+
+        # Размеры сцены (все объекты вместе)
+        self.scene_dimensions = [
+            round(max(xs) - min(xs), 3),
+            round(max(ys) - min(ys), 3),
+            round(max(zs) - min(zs), 3),
+        ]
+
+        # Сохранить базовые вершины для анимации
+        self._base_verts = [list(v) for v in all_verts]
+        self._obj_vert_ranges = {}    # obj_name → (start, end) в массиве вершин
+        self._obj_centers = {}
+        self._obj_base_loc = {}
+
+        # Пересчитываем диапазоны вершин по объектам
+        vert_pos = 0
+        for obj in (data.get("objects", []) if isinstance(data, dict) else []):
+            if obj.get("type") != "MESH":
+                continue
+            if obj.get("name") in (hidden_objects or set()):
+                continue
+            mesh = obj.get("mesh", {})
+            pverts = mesh.get("preview_verts", [])
+            n = len(pverts)
+            if n > 0:
+                name = obj["name"]
+                self._obj_vert_ranges[name] = (vert_pos, vert_pos + n)
+                t = obj.get("transform", {})
+                self._obj_base_loc[name] = t.get("position", [0, 0, 0])
+                xs_obj = [v[0] for v in pverts]
+                ys_obj = [v[1] for v in pverts]
+                zs_obj = [v[2] for v in pverts]
+                self._obj_centers[name] = [
+                    (min(xs_obj) + max(xs_obj)) / 2,
+                    (min(ys_obj) + max(ys_obj)) / 2,
+                    (min(zs_obj) + max(zs_obj)) / 2,
+                ]
+            vert_pos += n
 
         self.update()
 
@@ -650,7 +787,17 @@ class WireframeWidget(QWidget):
         painter.setPen(QPen(QColor(80, 80, 80)))
         painter.setFont(QFont("sans-serif", 9))
         mode_name = self.MODE_NAMES[self.view_mode]
-        painter.drawText(8, h - 8, f"ЛКМ: вращение | Колёсико: зум | ПКМ: режим [{mode_name}]")
+        lock_hint = " | 🔒 ПКМ: снять" if self.highlight.is_locked else ""
+        painter.drawText(8, h - 8, f"ЛКМ: вращение | Колёсико: зум{lock_hint}")
+
+        # Декартова система координат (левый нижний угол)
+        self._draw_axes(painter, w, h)
+
+        # Размеры модели (левый верхний угол)
+        self._draw_info_overlay(painter)
+
+        # Оверлей drag & drop
+        self.paint_drop_overlay(painter, w, h)
 
         painter.end()
 
@@ -666,8 +813,9 @@ class WireframeWidget(QWidget):
             x2, y2, d2 = projected[v2_idx]
 
             obj_name = self.edge_obj_names[i] if i < len(self.edge_obj_names) else ""
-            if self.highlighted_objects and obj_name in self.highlighted_objects:
-                highlight_lines.append((x1, y1, x2, y2, self.highlighted_objects[obj_name]))
+            hl = self.highlight.active
+            if hl and obj_name in hl:
+                highlight_lines.append((x1, y1, x2, y2, hl[obj_name]))
 
             avg_depth = (d1 + d2) / 2
             brightness = max(40, min(200, int(140 - avg_depth * 80)))
@@ -686,11 +834,11 @@ class WireframeWidget(QWidget):
         rnx, rny, rnz = self._rotate_normal(nx, ny, nz)
 
         if for_material:
-            # Для материалов — мягкий свет, чтобы оригинальные цвета были видны
-            key = max(0.0, rnz * 0.4 + rny * -0.3 + rnx * 0.15)
-            fill = max(0.0, rnx * -0.3 + rnz * 0.2 + rny * -0.2) * 0.3
-            rim = max(0.0, rny * 0.4 + rnz * 0.15) * 0.2
-            ambient = 0.65
+            # Для материалов — яркий свет, оригинальные цвета хорошо видны
+            key = max(0.0, rnz * 0.5 + rny * -0.4 + rnx * 0.2) * 0.6
+            fill = max(0.0, rnx * -0.4 + rnz * 0.3 + rny * -0.2) * 0.35
+            rim = max(0.0, rny * 0.5 + rnz * 0.2) * 0.25
+            ambient = 0.75
         else:
             # Для solid — контрастный свет, хорошо видна форма
             key = max(0.0, rnz * 0.7 + rny * -0.5 + rnx * 0.25)
@@ -761,28 +909,35 @@ class WireframeWidget(QWidget):
             painter.drawPolygon(poly)
 
         # Обводка подсвеченных объектов поверх всего
-        if self.highlighted_objects:
+        hl = self.highlight.active
+        if hl:
             painter.setBrush(Qt.NoBrush)
             for i, edge in enumerate(self.edges):
                 obj_name = self.edge_obj_names[i] if i < len(self.edge_obj_names) else ""
-                if obj_name not in self.highlighted_objects:
+                if obj_name not in hl:
                     continue
                 v1_idx, v2_idx = edge
                 if v1_idx >= len(projected) or v2_idx >= len(projected):
                     continue
                 x1, y1, _ = projected[v1_idx]
                 x2, y2, _ = projected[v2_idx]
-                painter.setPen(QPen(self.highlighted_objects[obj_name], 1.5))
+                painter.setPen(QPen(hl[obj_name], 1.5))
                 painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 
     def resizeEvent(self, event):
-        """Позиционировать кнопки зума в правом верхнем углу."""
+        """Позиционировать кнопки в правом верхнем углу."""
         super().resizeEvent(event)
         margin = 8
         x = self.width() - 30 - margin
         self.btn_zoom_in.move(x, margin)
         self.btn_zoom_out.move(x, margin + 34)
         self.btn_zoom_reset.move(x, margin + 68)
+        self.btn_rotate.move(x, margin + 102)
+
+    def _toggle_rotation(self):
+        self.auto_rotate = not self.auto_rotate
+        self.btn_rotate.setText("⏸" if self.auto_rotate else "▶")
+        self.update()
 
     def _zoom_step(self, factor):
         self.zoom *= factor
@@ -790,11 +945,73 @@ class WireframeWidget(QWidget):
         self.update()
 
     def _reset_camera(self):
-        self.rot_x = 25.0
-        self.rot_y = 45.0
-        self.zoom = 1.0
-        self.auto_rotate = True
+        self.rot_x = 0.0
+        self.rot_y = 270.0
+        self.zoom = 1.8
         self.update()
+
+    def _draw_axes(self, painter, w, h):
+        """Нарисовать оси координат в левом нижнем углу."""
+        import math
+
+        cx, cy = w - 45, h - 45
+        length = 30
+
+        angle_y = math.radians(self.rot_y)
+        angle_x = math.radians(self.rot_x)
+        cos_y, sin_y = math.cos(angle_y), math.sin(angle_y)
+        cos_x, sin_x = math.cos(angle_x), math.sin(angle_x)
+
+        def project_axis(ax, ay, az):
+            rx = ax * cos_y - ay * sin_y
+            ry = ax * sin_y + ay * cos_y
+            rz = az * cos_x - ry * sin_x
+            rd = az * sin_x + ry * cos_x
+            return cx + int(rx * length), cy - int(rz * length)
+
+        axes = [
+            ((1, 0, 0), QColor(220, 60, 60), "X"),   # красный
+            ((0, 1, 0), QColor(100, 200, 60), "Y"),   # зелёный
+            ((0, 0, 1), QColor(80, 130, 255), "Z"),    # синий
+        ]
+
+        # Фон круг
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(30, 30, 30, 160)))
+        painter.drawEllipse(cx - 38, cy - 38, 76, 76)
+
+        painter.setFont(QFont("sans-serif", 9, QFont.Bold))
+        for (ax, ay, az), color, label in axes:
+            ex, ey = project_axis(ax, ay, az)
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(cx, cy, ex, ey)
+            # Буква на конце оси
+            painter.setPen(QPen(color))
+            painter.drawText(ex - 4, ey + 4, label)
+
+    def _draw_info_overlay(self, painter):
+        """Показать размеры, scale, rotation в левом верхнем углу."""
+        if not self.verts:
+            return
+
+        painter.setFont(QFont("monospace", 9))
+        painter.setPen(QPen(QColor(150, 150, 150)))
+        x, y = 10, 18
+
+        dims = self.scene_dimensions
+        scale = self.scene_scale
+        rot = self.scene_rotation
+
+        # Размер в метрах (Blender unit = 1 метр по умолчанию)
+        painter.drawText(x, y, f"Размер: {dims[0]:.2f} × {dims[1]:.2f} × {dims[2]:.2f} м")
+        y += 16
+        if any(abs(s - 1.0) > 0.001 for s in scale):
+            painter.setPen(QPen(QColor(220, 160, 30)))
+            painter.drawText(x, y, f"Scale: {scale[0]:.3f}, {scale[1]:.3f}, {scale[2]:.3f}")
+            y += 16
+        if any(abs(r) > 0.01 for r in rot):
+            painter.setPen(QPen(QColor(220, 160, 30)))
+            painter.drawText(x, y, f"Rot: {rot[0]:.1f}°, {rot[1]:.1f}°, {rot[2]:.1f}°")
 
     def _auto_rotate_step(self):
         if self.auto_rotate and self.verts:
@@ -804,14 +1021,33 @@ class WireframeWidget(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.dragging = True
+            self._drag_started = event.pos()
             self.last_mouse_pos = event.pos()
             self.auto_rotate = False
         elif event.button() == Qt.RightButton:
-            self.cycle_mode()
+            if self.highlight.is_locked or self.highlight.has_any:
+                self.highlight.clear_all()
+                self.update()
+            else:
+                self.cycle_mode()
+        elif event.button() == Qt.MiddleButton:
+            self.highlight.clear_all()
+            self.update()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
+            # Если не двигали мышь — это клик, снять подсветку выделения
+            if self._drag_started and self.last_mouse_pos:
+                dx = abs(event.x() - self._drag_started.x())
+                dy = abs(event.y() - self._drag_started.y())
+                if dx < 3 and dy < 3:
+                    self.highlight.clear_selection()
+                    self.highlight.clear_lock()
+                    if hasattr(self, '_parent_window'):
+                        self._parent_window.selected_objects = set()
+                    self.update()
             self.dragging = False
+            self._drag_started = None
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.last_mouse_pos:
@@ -834,12 +1070,94 @@ class WireframeWidget(QWidget):
         self.zoom = max(0.2, min(5.0, self.zoom))
         self.update()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            self._space_pressed = True
+            return
+        if event.key() == Qt.Key_G and event.modifiers() & Qt.AltModifier:
+            # Alt+G — полный сброс: камера + остановить вращение
+            self.auto_rotate = False
+            self.btn_rotate.setText("▶")
+            self._reset_camera()
+            self.update()
+        elif event.key() == Qt.Key_G and not event.modifiers():
+            # G — вращение вкл/выкл
+            self._toggle_rotation()
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            # Enter (после Space) — фуллскрин вьюпорта
+            if hasattr(self, '_space_pressed') and self._space_pressed:
+                self._toggle_fullscreen()
+                self._space_pressed = False
+        elif event.key() == Qt.Key_Escape:
+            if hasattr(self, '_is_fullscreen') and self._is_fullscreen:
+                self._toggle_fullscreen()
+        else:
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            self._space_pressed = False
+        super().keyReleaseEvent(event)
+
+    def _toggle_fullscreen(self):
+        """Развернуть/свернуть превью на весь экран."""
+        if hasattr(self, '_is_fullscreen') and self._is_fullscreen:
+            # Вернуть обратно
+            self.setWindowFlags(Qt.Widget)
+            if hasattr(self, '_original_parent_layout'):
+                self._original_parent_layout.insertWidget(self._original_index, self)
+            self.showNormal()
+            self._is_fullscreen = False
+            # Показать кнопки зума
+            self.btn_zoom_in.show()
+            self.btn_zoom_out.show()
+            self.btn_zoom_reset.show()
+            self.btn_rotate.show()
+        else:
+            # Запомнить положение
+            parent = self.parent()
+            if parent and parent.layout():
+                self._original_parent_layout = parent.layout()
+                self._original_index = parent.layout().indexOf(self)
+            # Развернуть
+            self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+            self.showFullScreen()
+            self.setFocus()
+            self._is_fullscreen = True
+            # Показать кнопки зума
+            self.btn_zoom_in.show()
+            self.btn_zoom_out.show()
+            self.btn_zoom_reset.show()
+            self.btn_rotate.show()
+            self.btn_zoom_in.raise_()
+            self.btn_zoom_out.raise_()
+            self.btn_zoom_reset.raise_()
+            self.btn_rotate.raise_()
+
     def mouseDoubleClickEvent(self, event):
-        """Двойной клик — сброс камеры и включение авто-вращения."""
-        self.rot_x = 25.0
-        self.rot_y = 45.0
-        self.zoom = 1.0
-        self.auto_rotate = True
+        """Двойной клик — сброс камеры."""
+        self.rot_x = 0.0
+        self.rot_y = 270.0
+        self.zoom = 1.8
+        self.update()
+
+    def apply_animation_frame(self, frame_num, frame_data):
+        """Применить кадр анимации — подставить вершины напрямую."""
+        if not frame_data or not self._obj_vert_ranges:
+            return
+
+        new_verts = list(self.verts)
+
+        for obj_name, obj_verts in frame_data.items():
+            if obj_name not in self._obj_vert_ranges:
+                continue
+            start, end = self._obj_vert_ranges[obj_name]
+            n = end - start
+            # Подставляем вершины из кадра
+            for i, v in enumerate(obj_verts[:n]):
+                new_verts[start + i] = v
+
+        self.verts = new_verts
         self.update()
 
     def cleanup(self):
@@ -849,7 +1167,7 @@ class WireframeWidget(QWidget):
         self.faces = []
         self.obj_names = []
         self.edge_obj_names = []
-        self.highlighted_objects = {}
+        self.highlight.clear_all()
 
 
 class BlenderWorker(QThread):
@@ -928,8 +1246,11 @@ class MainWindow(QMainWindow):
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
+        self.app_config = load_config()
         self._setup_ui()
         self._apply_dark_theme()
+        self._apply_config()
+        self._restore_window_state()
 
     def _setup_ui(self):
         central = QWidget()
@@ -971,6 +1292,11 @@ class MainWindow(QMainWindow):
         self.btn_tools.setFixedHeight(36)
         self.btn_tools.clicked.connect(self._show_tools_menu)
         top_bar.addWidget(self.btn_tools)
+
+        self.btn_settings = QPushButton("Настройки")
+        self.btn_settings.setFixedHeight(36)
+        self.btn_settings.clicked.connect(self._show_settings)
+        top_bar.addWidget(self.btn_settings)
 
         main_layout.addLayout(top_bar)
 
@@ -1022,6 +1348,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.lbl_objects)
 
         self.tree = QTreeWidget()
+        self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.tree.setHeaderLabels(["", "Имя", "Тег", "Тип", "Вершины", "Полигоны"])
         self.tree.setColumnWidth(0, 28)
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -1036,7 +1363,7 @@ class MainWindow(QMainWindow):
         self.hidden_objects = set()
         self._updating_tree = False
         self._rename_map = {}
-        self.selected_object = None
+        self.selected_objects = set()
         self.object_tags = {}  # mesh_name → body_part_tag  # old_name → new_name
         left_layout.addWidget(self.tree)
 
@@ -1107,7 +1434,14 @@ class MainWindow(QMainWindow):
         preview_layout.addLayout(file_tabs_row)
 
         self.wireframe = WireframeWidget()
+        self.wireframe._parent_window = self
+        self.wireframe.file_dropped.connect(self._open_file_in_tab)
         preview_layout.addWidget(self.wireframe, 1)
+
+        # Таймлайн анимации (скрыт по умолчанию, включается в настройках)
+        self.timeline = TimelineWidget()
+        self.timeline.frame_changed.connect(self._on_animation_frame)
+        preview_layout.addWidget(self.timeline)
 
         center_splitter.addWidget(preview_container)
 
@@ -1187,6 +1521,7 @@ class MainWindow(QMainWindow):
 
         self.pie_chart = PieChartWidget()
         self.pie_chart.hovered_group.connect(self._on_chart_hover)
+        self.pie_chart.clicked_group.connect(self._on_chart_click)
         self.pie_chart.hover_left.connect(self._on_chart_leave)
         chart_container_layout.addWidget(self.pie_chart)
 
@@ -1311,6 +1646,17 @@ class MainWindow(QMainWindow):
         chosen_idx = names.index(chosen)
         s = sessions_with_data[chosen_idx][1]
         return s["data"].get("file", ""), s.get("hidden_objects", set())
+
+    def _apply_config(self):
+        """Применить настройки из конфига."""
+        show_timeline = self.app_config.get("line_of_animation", False)
+        self.timeline.setVisible(show_timeline and self.data is not None)
+
+    def _show_settings(self):
+        dialog = SettingsDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.app_config = dialog.get_config()
+            self._apply_config()
 
     def _show_tools_menu(self):
         """Показать меню инструментов."""
@@ -1809,7 +2155,7 @@ class MainWindow(QMainWindow):
             "path": path,
             "data": None,
             "hidden_objects": set(),
-            "selected_object": None,
+            "selected_objects": set(),
             "view_mode": 0,
         }
 
@@ -1828,7 +2174,7 @@ class MainWindow(QMainWindow):
         session = self._file_sessions[idx]
         session["data"] = self.data
         session["hidden_objects"] = set(self.hidden_objects)
-        session["selected_object"] = self.selected_object
+        session["selected_objects"] = set(self.selected_objects)
         session["view_mode"] = self.wireframe.view_mode
         session["tags"] = dict(self.object_tags)
 
@@ -1858,7 +2204,7 @@ class MainWindow(QMainWindow):
             if data:
                 self.data = data
                 self.hidden_objects = session.get("hidden_objects", set())
-                self.selected_object = session.get("selected_object")
+                self.selected_objects = session.get("selected_objects", set())
 
                 # Восстановить режим отображения
                 view_mode = session.get("view_mode", 0)
@@ -1949,7 +2295,7 @@ class MainWindow(QMainWindow):
                 "path": path,
                 "data": None,
                 "hidden_objects": set(),
-                "selected_object": None,
+                "selected_objects": set(),
                 "view_mode": 0,
             }
             self._switching_tab = True
@@ -2013,6 +2359,53 @@ class MainWindow(QMainWindow):
 
         self.lbl_objects.setText(f"Объекты ({obj_count})")
         self.lbl_issues.setText(f"Проблемы ({issue_count})")
+
+        # Загрузить анимации в таймлайн
+        if self.app_config.get("line_of_animation", False):
+            self._load_animation_data(data)
+
+    def _load_animation_data(self, data):
+        """Загрузить анимацию из Blender."""
+        blend_file = data.get("file", "")
+        if not blend_file or not self.blender_path:
+            self.timeline.setVisible(False)
+            return
+
+        import subprocess
+        script = Path(__file__).parent / "scripts" / "extract_animation.py"
+        cmd = [self.blender_path, "--background", blend_file,
+               "--python", str(script), "--"]
+        if self.hidden_objects:
+            cmd.extend(["--ignore", ",".join(self.hidden_objects)])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            stdout = result.stdout
+
+            start = stdout.find("===ANIM_JSON_START===")
+            end = stdout.find("===ANIM_JSON_END===")
+
+            if start >= 0 and end >= 0:
+                import json
+                json_str = stdout[start + len("===ANIM_JSON_START==="):end].strip()
+                anim_data = json.loads(json_str)
+
+                actions = anim_data.get("actions", [])
+                if actions and any(len(a.get("frames", {})) > 0 for a in actions):
+                    self.timeline.set_anim_data(anim_data)
+                    self.timeline.setVisible(True)
+                    self.status.showMessage(
+                        self.status.currentMessage() + f" | {len(actions)} анимация(й)", 5000
+                    )
+                    return
+        except Exception:
+            pass
+
+        self.timeline.setVisible(False)
+
+    def _on_animation_frame(self, frame, frame_data):
+        """Применить кадр анимации к 3D-превью."""
+        self.wireframe.apply_animation_frame(frame, frame_data)
 
     def _on_error(self, msg):
         self.progress.setVisible(False)
@@ -2079,24 +2472,46 @@ class MainWindow(QMainWindow):
         self.tree.expandAll()
         self._updating_tree = False
 
-    def _get_selection_highlight(self):
-        """Подсветка для выбранного объекта."""
-        if self.selected_object:
-            return {self.selected_object: QColor(100, 200, 255)}
-        return {}
+
 
     def _on_object_selected(self, current, previous):
         if not current or not self.data:
             return
 
-        # Извлечь имя без иконки (колонка 1 теперь)
         name = current.text(1)
         for ic in OBJECT_TYPE_ICONS.values():
             name = name.replace(f"{ic} ", "")
 
-        # Подсветить выбранный объект в превью
-        self.selected_object = name
-        self.wireframe.highlighted_objects = {name: QColor(100, 200, 255)}
+        # Shift = мульти-выделение
+        from PyQt5.QtWidgets import QApplication
+        modifiers = QApplication.keyboardModifiers()
+
+        if modifiers & Qt.ShiftModifier:
+            if name in self.selected_objects:
+                self.selected_objects.discard(name)
+            else:
+                self.selected_objects.add(name)
+        else:
+            self.selected_objects = {name}
+
+        # Подсветить все выбранные объекты
+        color = QColor(100, 200, 255)
+        sel_dict = {n: color for n in self.selected_objects}
+        self.wireframe.highlight.clear_selection()
+        for n, c in sel_dict.items():
+            self.wireframe.highlight._selection[n] = c
+
+        # Обновить scale/rotation для последнего выбранного
+        for o in self.data.get("objects", []):
+            if o["name"] == name:
+                t = o.get("transform", {})
+                self.wireframe.scene_scale = t.get("scale", [1, 1, 1])
+                self.wireframe.scene_rotation = t.get("rotation_deg", [0, 0, 0])
+                if o.get("type") == "MESH":
+                    dims = o.get("mesh", {}).get("dimensions", [0, 0, 0])
+                    self.wireframe.scene_dimensions = dims
+                break
+
         self.wireframe.update()
 
         obj = None
@@ -2670,12 +3085,28 @@ class MainWindow(QMainWindow):
                     min(c.blue() + 60, 255),
                 )
                 break
-        self.wireframe.highlighted_objects = {name: color for name in obj_names}
+        self.wireframe.highlight.set_hover({name: color for name in obj_names})
+        self.wireframe.update()
+
+    def _on_chart_click(self, group_label):
+        """Клик по сегменту — зафиксировать подсветку."""
+        obj_names = self.pie_chart.group_objects.get(group_label, set())
+        color = QColor(255, 60, 60)
+        for label, count, c in self.pie_chart.segments:
+            if label == group_label:
+                color = QColor(
+                    min(c.red() + 60, 255),
+                    min(c.green() + 60, 255),
+                    min(c.blue() + 60, 255),
+                )
+                break
+        self.wireframe.highlight.set_hover({name: color for name in obj_names})
+        self.wireframe.highlight.lock_current()
         self.wireframe.update()
 
     def _on_chart_leave(self):
         """Мышь ушла с диаграммы — вернуть подсветку выбранного."""
-        self.wireframe.highlighted_objects = self._get_selection_highlight()
+        self.wireframe.highlight.clear_hover()
         self.wireframe.update()
 
     def _set_view_mode(self, mode):
@@ -2702,7 +3133,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'tree_issues') and obj == self.tree_issues.viewport():
                 from PyQt5.QtCore import QEvent
                 if event.type() == QEvent.Leave:
-                    self.wireframe.highlighted_objects = self._get_selection_highlight()
+                    self.wireframe.highlight.clear_hover()
                     self.wireframe.update()
         except RuntimeError:
             pass
@@ -2744,13 +3175,16 @@ class MainWindow(QMainWindow):
                     if name:
                         obj_dict[name] = color
 
-        self.wireframe.highlighted_objects = obj_dict
+        self.wireframe.highlight.set_hover(obj_dict)
         self.wireframe.update()
 
     def _on_issue_clicked(self, item, column):
-        """Раскрыть/свернуть элемент при клике."""
+        """Клик по ошибке: раскрыть/свернуть + зафиксировать подсветку."""
         if item.childCount() > 0:
             item.setExpanded(not item.isExpanded())
+        # Фиксируем/снимаем подсветку
+        self.wireframe.highlight.toggle_lock()
+        self.wireframe.update()
 
     def _populate_issues(self, data):
         self.tree_issues.clear()
@@ -2912,9 +3346,38 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event):
-        """Очистка при закрытии."""
+        """Сохранить размеры и очистить."""
+        self._save_window_state()
         self.wireframe.cleanup()
         event.accept()
+
+    def _save_window_state(self):
+        """Сохранить размеры окна и сплиттеров в конфиг."""
+        geo = self.geometry()
+        self.app_config["window"] = {
+            "x": geo.x(),
+            "y": geo.y(),
+            "width": geo.width(),
+            "height": geo.height(),
+            "maximized": self.isMaximized(),
+        }
+        self.app_config["splitter_main"] = self.content_splitter.sizes()
+        save_config(self.app_config)
+
+    def _restore_window_state(self):
+        """Восстановить размеры окна из конфига."""
+        win = self.app_config.get("window")
+        if win:
+            if win.get("maximized"):
+                self.showMaximized()
+            else:
+                self.setGeometry(
+                    win.get("x", 100), win.get("y", 100),
+                    win.get("width", 1200), win.get("height", 750),
+                )
+        splitter = self.app_config.get("splitter_main")
+        if splitter and len(splitter) == self.content_splitter.count():
+            self.content_splitter.setSizes(splitter)
 
 
 def main():
