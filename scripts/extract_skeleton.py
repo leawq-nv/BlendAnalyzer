@@ -30,11 +30,11 @@ def apply_all_modifiers_and_transforms(ignore_names):
     if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
-    # Скрыть ignored
-    for obj in bpy.context.scene.objects:
+    # Скрыть и удалить ignored объекты
+    for obj in list(bpy.context.scene.objects):
         if obj.name in ignore_names:
-            obj.hide_viewport = True
-            obj.hide_render = True
+            print(f"  Removing ignored: {obj.name}")
+            bpy.data.objects.remove(obj, do_unlink=True)
 
     bpy.ops.object.select_all(action='DESELECT')
 
@@ -53,10 +53,24 @@ def apply_all_modifiers_and_transforms(ignore_names):
 
         for mod in list(obj.modifiers):
             try:
+                # Убедиться что только этот объект выделен и активен
+                bpy.ops.object.select_all(action='DESELECT')
+                bpy.context.view_layer.objects.active = obj
+                obj.select_set(True)
                 bpy.ops.object.modifier_apply(modifier=mod.name)
                 print(f"  Applied {mod.name} on {obj.name}")
             except Exception as e:
                 print(f"  Failed {mod.name} on {obj.name}: {e}")
+                # Попробуем через convert to mesh как fallback
+                try:
+                    bpy.ops.object.select_all(action='DESELECT')
+                    bpy.context.view_layer.objects.active = obj
+                    obj.select_set(True)
+                    bpy.ops.object.convert(target='MESH')
+                    print(f"  Converted {obj.name} to mesh (fallback)")
+                    break
+                except Exception:
+                    pass
 
         try:
             bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
@@ -66,8 +80,21 @@ def apply_all_modifiers_and_transforms(ignore_names):
         obj.select_set(False)
         count += 1
 
+    # Fallback для объектов с оставшимися модификаторами — convert to mesh
+    for obj in list(bpy.context.scene.objects):
+        if obj.type != 'MESH' or obj.hide_viewport:
+            continue
+        if len(obj.modifiers) > 0:
+            print(f"  Force converting {obj.name} ({[m.name for m in obj.modifiers]})")
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = obj
+            obj.select_set(True)
+            try:
+                bpy.ops.object.convert(target='MESH')
+            except Exception as e:
+                print(f"    Convert failed: {e}")
+
     print(f"Processed {count} objects")
-    # Обновить depsgraph после изменений
     bpy.context.view_layer.update()
 
 
@@ -142,8 +169,9 @@ def extract_vertical_branches(all_verts, num_slices=50):
 
     x_range = max(v.x for v in all_verts) - min(v.x for v in all_verts)
     y_range = max(v.y for v in all_verts) - min(v.y for v in all_verts)
-    # Маленький merge_dist чтобы ноги не сливались
-    merge_dist = min(x_range, y_range) * 0.08
+    # Адаптивный merge_dist
+    body_width = x_range
+    merge_dist = body_width * 0.12
 
     slice_h = z_range / num_slices
     thickness = slice_h * 1.2
@@ -267,7 +295,7 @@ def _track_branches(slices, merge_dist, total_range):
         active = new_active
 
     # Фильтр коротких
-    min_len = total_range * 0.06
+    min_len = total_range * 0.12
     return [b for b in branches if len(b) >= 2 and
             max(p[2] for p in b) - min(p[2] for p in b) >= min_len]
 

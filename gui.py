@@ -1693,6 +1693,9 @@ class MainWindow(QMainWindow):
 
     def _get_tool_blend_file(self):
         """Получить путь к .blend для инструмента. Если несколько вкладок — спросить."""
+        # Сохранить текущее состояние в сессию
+        self._save_current_session()
+
         sessions_with_data = []
         for idx, session in self._file_sessions.items():
             if session.get("data"):
@@ -1768,10 +1771,10 @@ class MainWindow(QMainWindow):
         act_bones.triggered.connect(self._create_bones)
         menu.addAction(act_bones)
 
-        act_geo_skeleton = QAction("Геом. извл. скелета (авто)", self)
-        act_geo_skeleton.setEnabled(has_data)
-        act_geo_skeleton.triggered.connect(self._extract_skeleton_geo)
-        menu.addAction(act_geo_skeleton)
+        act_rigify = QAction("Rigify шаблон (авто-скелет)", self)
+        act_rigify.setEnabled(has_data)
+        act_rigify.triggered.connect(self._create_rigify)
+        menu.addAction(act_rigify)
 
         menu.exec_(self.btn_tools.mapToGlobal(
             self.btn_tools.rect().bottomLeft()
@@ -1865,58 +1868,135 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось применить Mirror:\n{msg}")
 
 
-    def _extract_skeleton_geo(self):
-        """Геометрическое извлечение скелета — полностью автоматическое."""
+    def _create_rigify(self):
+        """Создать Rigify meta-rig, масштабированный под модель."""
         blend_file, hidden = self._get_tool_blend_file()
         if not blend_file or not os.path.isfile(blend_file):
             return
 
-        reply = QMessageBox.warning(
-            self, "Геометрическое извлечение скелета",
-            "Автоматическое извлечение скелета из геометрии модели.\n\n"
-            "Алгоритм:\n"
-            "1. Нарезает модель горизонтальными срезами\n"
-            "2. Находит ветвления (где геометрия разделяется)\n"
-            "3. Прокладывает кости по центру каждой ветки\n"
-            "4. Привязывает через Automatic Weights\n\n"
-            "⚠ Все модификаторы и трансформации будут применены.\n"
-            "⚠ Оригинальный файл НЕ будет изменён!\n\n"
-            "Лучше всего работает с гуманоидными моделями.\n\n"
-            "Продолжить?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+        from PyQt5.QtWidgets import QDialog, QSpinBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Rigify шаблон")
+        dialog.setMinimumWidth(400)
+        dlg_layout = QVBoxLayout(dialog)
+
+        info = QLabel(
+            "Создание Rigify meta-rig (шаблон скелета).\n\n"
+            "Что будет сделано:\n"
+            "1. Применены все модификаторы и трансформации\n"
+            "2. Скрытые объекты удалены из копии\n"
+            "3. Создан Rigify Human meta-rig\n"
+            "4. Масштабирован под вашу модель\n\n"
+            "⚠ Оригинал НЕ будет изменён!"
         )
-        if reply != QMessageBox.Yes:
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #ccc; font-size: 12px;")
+        dlg_layout.addWidget(info)
+
+        # Кол-во пар рук
+        arms_layout = QHBoxLayout()
+        arms_label = QLabel("Пар рук:")
+        arms_label.setStyleSheet("color: #ccc; font-size: 13px;")
+        arms_layout.addWidget(arms_label)
+
+        spin_arms = QSpinBox()
+        spin_arms.setRange(1, 4)
+        spin_arms.setValue(2)
+        spin_arms.setStyleSheet("background: #252526; color: #d4d4d4; border: 1px solid #3c3c3c; padding: 4px; font-size: 13px;")
+        arms_layout.addWidget(spin_arms)
+
+        arms_hint = QLabel("(1 = стандарт, 2 = 4 руки)")
+        arms_hint.setStyleSheet("color: #888; font-size: 11px;")
+        arms_layout.addWidget(arms_hint)
+        arms_layout.addStretch()
+        dlg_layout.addLayout(arms_layout)
+
+        # Направление модели
+        from PyQt5.QtWidgets import QButtonGroup, QRadioButton
+        dir_label = QLabel("Модель смотрит в сторону:")
+        dir_label.setStyleSheet("color: #ccc; font-size: 13px; margin-top: 8px;")
+        dlg_layout.addWidget(dir_label)
+
+        dir_layout = QHBoxLayout()
+        self._dir_group = QButtonGroup()
+
+        directions = [
+            ("-Y (по умолчанию в Blender)", "-Y"),
+            ("+Y", "+Y"),
+            ("-X", "-X"),
+            ("+X", "+X"),
+        ]
+
+        for i, (text, val) in enumerate(directions):
+            rb = QRadioButton(text)
+            rb.setStyleSheet("color: #ccc; font-size: 12px;")
+            if i == 0:
+                rb.setChecked(True)
+            self._dir_group.addButton(rb, i)
+            dir_layout.addWidget(rb)
+
+        dir_layout.addStretch()
+        dlg_layout.addLayout(dir_layout)
+
+        self._dir_values = [d[1] for d in directions]
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        btn_ok = QPushButton("Создать")
+        btn_ok.setStyleSheet("background-color: #0e639c; color: white; border: none; border-radius: 4px; padding: 8px 20px; font-size: 13px;")
+        btn_ok.clicked.connect(dialog.accept)
+        buttons.addWidget(btn_ok)
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setStyleSheet("background-color: #3c3c3c; color: #ccc; border: none; border-radius: 4px; padding: 8px 20px; font-size: 13px;")
+        btn_cancel.clicked.connect(dialog.reject)
+        buttons.addWidget(btn_cancel)
+        dlg_layout.addLayout(buttons)
+
+        dialog.setStyleSheet("QDialog { background-color: #1e1e1e; }")
+
+        if dialog.exec_() != QDialog.Accepted:
             return
 
-        base, ext = os.path.splitext(blend_file)
-        output_path = f"{base}_skeleton{ext}"
+        arm_pairs = spin_arms.value()
+        extra_arms = max(0, arm_pairs - 1)
+        facing = self._dir_values[self._dir_group.checkedId()]
 
-        self.status.showMessage("Геометрическое извлечение скелета...")
+        base, ext = os.path.splitext(blend_file)
+        output_path = f"{base}_rigify{ext}"
+
+        self.status.showMessage("Создание Rigify meta-rig...")
         self.progress.setVisible(True)
 
-        script = Path(__file__).parent / "scripts" / "extract_skeleton.py"
-        ok, msg = self._run_blender_script(blend_file, script, output_path, "===SKELETON_DONE===", hidden)
+        script = Path(__file__).parent / "scripts" / "create_rigify.py"
+        extra_args = ["--facing", facing]
+        if extra_arms > 0:
+            extra_args.extend(["--extra-arms", str(extra_arms)])
+        ok, msg = self._run_blender_script(blend_file, script, output_path, "===RIGIFY_DONE===", hidden, extra_args)
 
         self.progress.setVisible(False)
         if ok:
-            self.status.showMessage(f"Скелет извлечён! Сохранено: {os.path.basename(output_path)}", 5000)
+            self.status.showMessage(f"Rigify создан! Сохранено: {os.path.basename(output_path)}", 5000)
             reply = QMessageBox.information(
-                self, "Готово",
-                f"Скелет извлечён из геометрии!\n\n{msg[:400] if msg else ''}\n\n"
-                f"Сохранено в:\n{output_path}\n\n"
+                self, "Rigify готов",
+                f"Meta-rig создан и масштабирован под модель!\n\n"
+                f"Следующие шаги в Blender:\n"
+                f"1. Откройте {os.path.basename(output_path)}\n"
+                f"2. Выделите meta-rig → Edit Mode\n"
+                f"3. Подвиньте кости к частям тела\n"
+                f"4. Object Mode → свойства арматуры → Generate Rig\n\n"
                 f"Открыть в новой вкладке?",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
                 self._open_file_in_tab(output_path)
-        elif "SKELETON_ERROR" in (msg or ""):
-            error_detail = msg.split("SKELETON_ERROR===")[-1].strip() if "SKELETON_ERROR" in msg else msg
-            self.status.showMessage("Ошибка извлечения скелета")
-            QMessageBox.critical(self, "Ошибка", f"Не удалось извлечь скелет:\n{error_detail}")
+        elif "RIGIFY_ERROR" in (msg or ""):
+            error_detail = msg.split("RIGIFY_ERROR===")[-1].strip() if "RIGIFY_ERROR" in msg else ""
+            self.status.showMessage("Ошибка Rigify")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать Rigify meta-rig:\n{error_detail}")
         else:
-            self.status.showMessage("Ошибка извлечения скелета")
-            QMessageBox.critical(self, "Ошибка", f"Не удалось извлечь скелет:\n{msg[:500] if msg else 'Неизвестная ошибка'}")
+            self.status.showMessage("Ошибка Rigify")
+            QMessageBox.critical(self, "Ошибка", f"Ошибка:\n{msg[:500] if msg else 'Неизвестная ошибка'}")
 
     def _create_bones(self):
         """Создать кости по тегам или именам мешей."""

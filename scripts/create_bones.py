@@ -259,12 +259,11 @@ def main():
     if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
-    # Скрыть ignored объекты в Blender
-    for obj in bpy.context.scene.objects:
+    # Удалить ignored объекты из копии
+    for obj in list(bpy.context.scene.objects):
         if obj.name in ignore_names:
-            obj.hide_viewport = True
-            obj.hide_render = True
-            obj.hide_set(True)
+            print(f"  Removing ignored: {obj.name}")
+            bpy.data.objects.remove(obj, do_unlink=True)
 
     # Применить все модификаторы и трансформации
     if apply_all:
